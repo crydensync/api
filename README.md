@@ -4,9 +4,16 @@ A generic HTTP wrapper around [CrydenSync](https://github.com/crydensync/cryden)
 
 Every consumer talks to this over plain HTTP — no Go required. This is what a JS/Python SDK calls under the hood, and what you can call directly with `curl`/`fetch` in the meantime.
 
-## Setup
+## Prerequisites
+
+- Go 1.22+ (check `go.mod` for exact version)
+- A running Postgres instance (local, Docker, or hosted — e.g. Supabase, Neon, RDS)
+
+## Getting started
 
 ```bash
+git clone https://github.com/crydensync/api
+cd api
 cp .env.example .env   # fill in DATABASE_URL, JWT_SECRET, CORS_ORIGINS
 go run .
 ```
