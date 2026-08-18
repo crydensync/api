@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build-and-smoketest:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: api
+          POSTGRES_PASSWORD: api_test
+          POSTGRES_DB: api_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build -v ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Check formatting
+        run: |
+          if [ -n "$(gofmt -l .)" ]; then
+            echo "::error::gofmt found unformatted files:"
+            gofmt -l .
+            exit 1
+          fi
+
+      - name: Install postgresql-client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Run migrations
+        run: |
+          for f in migrations/*.up.sql; do
+            psql "$DATABASE_URL" -f "$f"
+          done
+        env:
+          DATABASE_URL: postgres://api:api_test@localhost:5432/api_test?sslmode=disable
+
+      - name: Start server
+        run: |
+          go build -o api_server .
+          ./api_server &
+          sleep 2
+        env:
+          DATABASE_URL: postgres://api:api_test@localhost:5432/api_test?sslmode=disable
+          JWT_SECRET: ci-test-secret-not-for-prod
+          CORS_ORIGINS: http://localhost:5173
+          PORT: 8080
+
+      - name: Run smoke test against the live server
+        run: cd internal/smoketest && go run . http://localhost:8080
