@@ -1,0 +1,333 @@
+openapi: 3.0.3
+info:
+  title: CrydenSync API
+  version: "1.0"
+  description: >
+    A self-hosted HTTP wrapper around the CrydenSync auth engine.
+    Every response follows one of two envelope shapes: {"data": ...}
+    on success, or {"error": {"code": ..., "message": ...}} on
+    failure. `code` is the stable string to branch on programmatically
+    — never parse `message`.
+servers:
+  - url: http://localhost:8080/v1
+    description: Local dev
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    Tokens:
+      type: object
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+
+    Session:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        ip: { type: string }
+        user_agent: { type: string }
+        created_at: { type: string, format: date-time }
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+
+  responses:
+    BadRequest:
+      description: Malformed request body
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unauthorized:
+      description: Missing/invalid/expired credentials or token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Forbidden:
+      description: Authenticated, but not permitted (e.g. account locked, session not owned)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Conflict:
+      description: Resource already exists (e.g. duplicate email)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+paths:
+  /signup:
+    post:
+      summary: Create a new user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      user_id: { type: string }
+                      email: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /login:
+    post:
+      summary: Authenticate and receive a token pair
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Tokens' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Account locked due to repeated failed attempts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /refresh:
+    post:
+      summary: Rotate a refresh token for a new token pair
+      description: >
+        Presenting an already-rotated (reused) token returns
+        token_reused and revokes the ENTIRE session family — every
+        token descended from that login, not just the one presented.
+        The client must discard all tokens and force a full
+        re-login when this happens.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        '200':
+          description: New token pair issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Tokens' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /logout:
+    post:
+      summary: Revoke a single session
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_id]
+              properties:
+                session_id: { type: string }
+      responses:
+        '200': { description: Session revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: session does not belong to the authenticated user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /logout-all:
+    post:
+      summary: Revoke every session for the authenticated user
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: All sessions revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /verify:
+    get:
+      summary: Check whether the presented access token is valid
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Token is valid
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      user_id: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /sessions:
+    get:
+      summary: List active sessions for the authenticated user
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: List of active sessions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Session' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /sessions/{id}:
+    delete:
+      summary: Revoke a specific session
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Session revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /change-password:
+    post:
+      summary: Change password
+      description: >
+        Requires the current password as re-confirmation. On success,
+        ALL sessions are revoked, including the one making this
+        request — the client must discard its tokens and log in
+        again.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string }
+                new_password: { type: string }
+      responses:
+        '200': { description: Password changed, all sessions revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /delete-account:
+    post:
+      summary: Permanently delete the authenticated user's account
+      description: Requires the current password as re-confirmation. Irreversible.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password]
+              properties:
+                current_password: { type: string }
+      responses:
+        '200': { description: Account deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /email/request-change:
+    post:
+      summary: Request an email change
+      description: >
+        Sends a verification link to the NEW address. The email is
+        NOT updated until /email/confirm-change is called with the
+        resulting token.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [new_email]
+              properties:
+                new_email: { type: string, format: email }
+      responses:
+        '200': { description: Verification email sent }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /email/confirm-change:
+    post:
+      summary: Confirm an email change using the token from the verification link
+      description: >
+        Deliberately public — no Bearer auth required. The token
+        itself is the proof of authorization, since the user may be
+        clicking the link from an email client with no active
+        session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        '200': { description: Email changed }
+        '400':
+          description: Token invalid, already used, or expired
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /health:
+    get:
+      summary: Health check
+      responses:
+        '200': { description: Healthy }
+        '503': { description: Database unreachable }
