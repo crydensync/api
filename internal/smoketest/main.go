@@ -168,6 +168,35 @@ func main() {
 		return nil
 	})
 
+	check("oauth start for an unconfigured provider is rejected, not silently allowed", func() error {
+		// This deployment's env almost certainly doesn't have real
+		// Google/GitHub client credentials set, which is exactly the
+		// case this checks: an unconfigured provider must fail
+		// cleanly, not redirect somewhere broken. A provider name
+		// that was never going to exist proves the same thing either
+		// way.
+		var resp map[string]any
+		status, _ := doJSON("GET", "/v1/oauth/not-a-real-provider", nil, "", &resp)
+		if status != 404 {
+			return fmt.Errorf("expected 404 for an unconfigured/unknown provider, got %d", status)
+		}
+		return nil
+	})
+
+	check("oauth link without auth is rejected", func() error {
+		// The whole reason LinkStart/LinkCallback are split from
+		// Start/Callback: linking must only ever happen for an
+		// authenticated caller. This is the one piece of that
+		// guarantee this smoke test can verify without a real
+		// browser round trip to a provider.
+		var resp map[string]any
+		status, _ := doJSON("GET", "/v1/oauth/google/link", nil, "", &resp)
+		if status != 401 {
+			return fmt.Errorf("expected 401 for an unauthenticated link attempt, got %d", status)
+		}
+		return nil
+	})
+
 	fmt.Println("\nALL CHECKS PASSED")
 }
 
