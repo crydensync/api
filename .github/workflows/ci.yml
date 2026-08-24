@@ -4,10 +4,8 @@ on:
   push:
     branches: [ "main" ]
   pull_request:
-    branches: [ "main" ]
-
-jobs:
-  build-and-smoketest:
+    branches: [ "main" ]                              
+jobs:                                                   build-and-smoketest:
     runs-on: ubuntu-latest
 
     services:

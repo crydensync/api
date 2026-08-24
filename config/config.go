@@ -17,6 +17,16 @@ type Config struct {
 	AccessTokenTTL      time.Duration
 	EdgeRateLimit       int
 	EdgeRateLimitWindow time.Duration
+
+	// BaseURL is this api deployment's own public URL, used to build
+	// OAuth callback URLs (e.g. BaseURL + "/v1/oauth/google/callback")
+	// that get registered with each provider's console.
+	BaseURL string
+
+	GoogleClientID     string
+	GoogleClientSecret string
+	GitHubClientID     string
+	GitHubClientSecret string
 }
 
 // Load reads .env (if present, filling only gaps — real env vars
@@ -69,6 +79,17 @@ func Load() (Config, error) {
 		}
 		cfg.EdgeRateLimit = n
 	}
+
+	// OAuth is deliberately optional at config-load time — a
+	// deployment that hasn't set these up yet should still run fine
+	// for password-based auth. httpapi.NewRouter only registers the
+	// OAuth routes for providers that actually have both a client ID
+	// and secret set.
+	cfg.BaseURL = strings.TrimRight(os.Getenv("BASE_URL"), "/")
+	cfg.GoogleClientID = os.Getenv("GOOGLE_CLIENT_ID")
+	cfg.GoogleClientSecret = os.Getenv("GOOGLE_CLIENT_SECRET")
+	cfg.GitHubClientID = os.Getenv("GITHUB_CLIENT_ID")
+	cfg.GitHubClientSecret = os.Getenv("GITHUB_CLIENT_SECRET")
 
 	return cfg, nil
 }

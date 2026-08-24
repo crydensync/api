@@ -37,12 +37,13 @@ func main() {
 		Verifications:  postgres.NewVerificationStore(db),
 		EmailSender:    &consoleEmailSender{}, // dev stand-in — see email_sender.go
 		AccessTokenTTL: cfg.AccessTokenTTL,
+		OAuth:          postgres.NewOAuthStore(db),
 	})
 	if err != nil {
 		log.Fatalf("failed to construct cryden engine: %v", err)
 	}
 
-	router := httpapi.NewRouter(engine, db)
+	router := httpapi.NewRouter(engine, db, cfg)
 	limiter := httpapi.NewEdgeRateLimiter(cfg.EdgeRateLimit, cfg.EdgeRateLimitWindow)
 	handler := httpapi.WithCORS(cfg.CORSOrigins, httpapi.WithEdgeRateLimit(limiter, router))
 
