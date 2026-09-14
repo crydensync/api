@@ -32,7 +32,9 @@ GITHUB_CLIENT_SECRET=...
 
 A provider missing its client ID or secret is simply unavailable — its endpoints return `404 oauth_provider_not_configured` rather than the server refusing to start.
 
-Supported providers are `google`, `github`, `microsoft`, `discord` and `gitlab` — all the same authorization-code shape, so each is one case in `httpapi/oauth_handlers.go` plus its env vars:
+Supported providers are `google`, `github`, `microsoft`, `discord`, `gitlab` and `apple`.
+
+`google`/`github`/`microsoft`/`discord`/`gitlab` all have the same authorization-code shape, so each is one case in `httpapi/oauth_handlers.go` plus its env vars:
 
 ```
 MICROSOFT_CLIENT_ID=...       MICROSOFT_CLIENT_SECRET=...
@@ -40,7 +42,20 @@ DISCORD_CLIENT_ID=...         DISCORD_CLIENT_SECRET=...
 GITLAB_CLIENT_ID=...          GITLAB_CLIENT_SECRET=...
 ```
 
-Apple is **not** wired up yet — its client "secret" is a short-lived JWT you sign with a key from Apple's developer console rather than a static string, and the email arrives inside a signed `id_token` instead of from a userinfo call. It needs its own piece of work, not another case in that switch.
+Apple is the one that does not fit that shape, and it is the only provider needing more than an ID and a secret:
+
+```
+APPLE_CLIENT_ID=com.example.web        # your Services ID, not the app bundle ID
+APPLE_TEAM_ID=XXXXXXXXXX
+APPLE_KEY_ID=XXXXXXXXXX
+APPLE_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\nMIG...\n-----END PRIVATE KEY-----
+```
+
+- Its client "secret" is a short-lived ES256 JWT this API signs itself (`httpapi/apple.go`), which is why it needs the `.p8` key rather than a string. In `.env`, write the key's newlines as `\n`; a real multiline value passed through a secret manager is used as-is.
+- There is no userinfo endpoint. The email and account ID come from the `id_token` in the token response, verified against Apple's published signing keys (issuer, audience, expiry and RS256 all enforced) rather than merely decoded.
+- The authorization request pins `response_mode=query`, so the existing GET callback route works unchanged. Consequently the one-time `user` payload (the name Apple sends only on a first authorization) is not captured — this API stores the id_token's email, not names.
+
+All four `APPLE_*` values are required; a partially configured Apple is simply unavailable, like any other unconfigured provider.
 
 ## Second factors
 
@@ -129,7 +144,7 @@ POST   /v1/login/passkey/finish      (completes a paused login)
 POST   /v1/login/recovery-code       (completes a paused login)
 ```
 
-`{provider}` is `google`, `github`, `microsoft`, `discord` or `gitlab`.
+`{provider}` is `google`, `github`, `microsoft`, `discord`, `gitlab` or `apple`.
 The two OAuth flows are separate
 on purpose:
 - `/oauth/{provider}` → `/oauth/{provider}/callback` is login/signup —

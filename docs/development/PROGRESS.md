@@ -127,3 +127,73 @@ rather than silently patched):
 Next: finish Tier 1's Apple provider (its own commit, and it will need
 real credentials before it can be smoke-tested), then a first DB-backed
 smoke-test run of everything above, then Tier 2.
+
+## 2026-09-14 (later) — the two flagged issues, then Apple
+
+Same branch, four more commits. Tier 1 is now complete, Apple included.
+
+**Fixed the two things flagged in the entry above**, each its own commit:
+
+- `fix: map password-policy and breached-password errors to 400` —
+  `auth.ErrPasswordPolicyViolation` and `auth.ErrPasswordBreached` now
+  map to `400`/`password_policy_violation` and `400`/`password_breached`
+  instead of falling through to `500 internal_error`. The policy error
+  keeps its struct case and `writeErr` reads the broken-rule codes off
+  the error into an optional `details` array — the one addition to the
+  error envelope, and it appears on no other error (both halves are
+  pinned by tests, so an existing client sees a byte-identical shape).
+- `chore: rename .env.exampl to .env.example` — renamed rather than
+  rewriting the README, since the README's name is the conventional one
+  and `.gitignore` only ignores `.env` itself.
+
+**Apple** (`feat: add Sign in with Apple`, `httpapi/apple.go` +
+`apple_test.go` + `golang-jwt` promoted from indirect to direct):
+
+- Client secret is an ES256 JWT signed per exchange with the console
+  `.p8` key (10-minute expiry, `kid` header, `iss`=team, `sub`=client
+  ID, `aud`=Apple). `APPLE_CLIENT_ID`/`TEAM_ID`/`KEY_ID`/`PRIVATE_KEY`
+  are all required; a partial config reads as unavailable, same as any
+  other unconfigured provider. `APPLE_PRIVATE_KEY` accepts a `.env`-style
+  `\n`-escaped PEM and leaves a real multiline value alone.
+- No userinfo endpoint: the identity comes from the token response's
+  `id_token`, verified against Apple's JWKS (RS256 only, issuer,
+  audience, expiry, `kid` lookup) with the key set cached for an hour
+  and refetched once on an unknown `kid` so a rotation is picked up.
+  An unverified decode would have let anyone who can reach the callback
+  mint an account, so this is the part that got the most test attention.
+- `exchangeCode` now takes the client secret as an argument and returns
+  both the access token and the id_token, which lets Apple reuse the
+  existing POST plumbing instead of duplicating it. The authorization
+  redirect query is now built in one `authQuery` helper used by both the
+  login and linking flows, so a provider-specific parameter cannot be
+  added to one and forgotten in the other.
+
+Assumptions made while building Apple (recorded, not silent):
+
+- **`response_mode=query`**, so the existing GET callback route works
+  unchanged. Consequence: Apple's one-time `user` payload (the name it
+  sends only on a first authorization, and only under `form_post`) is
+  not captured — this repo stores the id_token's email, never names,
+  which is all `LoginWithOAuth` takes anyway.
+- **No `nonce`.** Apple requires one for the hybrid/implicit flow; this
+  is the authorization-code flow, where the code is single-use, bound to
+  this client, and the redirect already carries a CSRF `state` cookie
+  verified against a signed cookie. Revisit only if a hybrid flow is
+  ever added.
+- **Apple's email is required**, like every other provider here — if the
+  id_token has no email claim the login fails with the existing
+  `oauth_email_not_available` rather than inventing an identity.
+
+Verification: `go build ./...`, `go vet ./...` and `go test ./...` clean,
+`gofmt -l` empty. `apple_test.go` covers the generated secret (parses as
+ES256, correct `kid`/`iss`/`aud`/`sub`, unexpired; RSA and non-PEM keys
+rejected) and id_token verification (accepted when signed by the served
+key; rejected for wrong audience, wrong issuer, expiry, different
+signing key, unknown `kid`, missing subject, and an `alg: none` token).
+Still **not** verified here: a live Apple round trip (no credentials, no
+network), the DB-backed smoke test (no Postgres), and the WebAuthn
+ceremonies (no browser authenticator). Those remain the first things to
+run on a real deployment.
+
+Next: Tier 2, on its own branch per `CODEX.md` — and before or alongside
+it, the first DB-backed smoke-test run of everything in Tier 1.
