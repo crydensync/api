@@ -27,6 +27,33 @@ type Config struct {
 	GoogleClientSecret string
 	GitHubClientID     string
 	GitHubClientSecret string
+
+	MicrosoftClientID     string
+	MicrosoftClientSecret string
+	DiscordClientID       string
+	DiscordClientSecret   string
+	GitLabClientID        string
+	GitLabClientSecret    string
+
+	// EncryptionKey encrypts TOTP secrets and WebAuthn ceremony state at
+	// rest. Required only if TOTP or WebAuthn is enabled — cryden refuses
+	// to construct an engine with either store set and this empty, since a
+	// TOTP secret has to be recoverable in plaintext to check a code, so
+	// it is encrypted rather than hashed. Treat it with the same care as
+	// JWT_SECRET.
+	EncryptionKey string
+
+	// TOTPIssuerName is what the user's authenticator app shows next to
+	// the account. Cosmetic. Empty means cryden's own default ("Cryden").
+	TOTPIssuerName string
+
+	// WebAuthnRPID is the app's real registrable domain — passkeys are
+	// cryptographically bound to it, so unlike TOTPIssuerName this is a
+	// genuine security parameter, not a label. WebAuthnRPOrigins must
+	// list the exact scheme+host+port the browser will send.
+	WebAuthnRPID          string
+	WebAuthnRPDisplayName string
+	WebAuthnRPOrigins     []string
 }
 
 // Load reads .env (if present, filling only gaps — real env vars
@@ -90,6 +117,28 @@ func Load() (Config, error) {
 	cfg.GoogleClientSecret = os.Getenv("GOOGLE_CLIENT_SECRET")
 	cfg.GitHubClientID = os.Getenv("GITHUB_CLIENT_ID")
 	cfg.GitHubClientSecret = os.Getenv("GITHUB_CLIENT_SECRET")
+	cfg.MicrosoftClientID = os.Getenv("MICROSOFT_CLIENT_ID")
+	cfg.MicrosoftClientSecret = os.Getenv("MICROSOFT_CLIENT_SECRET")
+	cfg.DiscordClientID = os.Getenv("DISCORD_CLIENT_ID")
+	cfg.DiscordClientSecret = os.Getenv("DISCORD_CLIENT_SECRET")
+	cfg.GitLabClientID = os.Getenv("GITLAB_CLIENT_ID")
+	cfg.GitLabClientSecret = os.Getenv("GITLAB_CLIENT_SECRET")
+
+	// Second factors are optional too, and for the same reason: a
+	// deployment that hasn't set ENCRYPTION_KEY should still run fine for
+	// password-only auth. main.go only wires the TOTP/WebAuthn stores when
+	// the key is present, and cryden then reports those methods as
+	// unavailable (404, same shape as an unconfigured OAuth provider)
+	// rather than the server refusing to start.
+	cfg.EncryptionKey = os.Getenv("ENCRYPTION_KEY")
+	cfg.TOTPIssuerName = os.Getenv("TOTP_ISSUER_NAME")
+	cfg.WebAuthnRPID = os.Getenv("WEBAUTHN_RP_ID")
+	cfg.WebAuthnRPDisplayName = os.Getenv("WEBAUTHN_RP_DISPLAY_NAME")
+	if origins := os.Getenv("WEBAUTHN_RP_ORIGINS"); origins != "" {
+		for _, o := range strings.Split(origins, ",") {
+			cfg.WebAuthnRPOrigins = append(cfg.WebAuthnRPOrigins, strings.TrimSpace(o))
+		}
+	}
 
 	return cfg, nil
 }
