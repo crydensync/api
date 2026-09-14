@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 
 	"github.com/crydensync/cryden/v2"
 	"github.com/crydensync/cryden/v2/auth"
@@ -83,6 +84,49 @@ func (h *OAuthHandlers) provider(name string) (oauthProvider, bool) {
 			tokenURL:     "https://github.com/login/oauth/access_token",
 			userInfoURL:  "https://api.github.com/user",
 			scope:        "read:user user:email",
+		}, true
+	case "microsoft":
+		if h.Config.MicrosoftClientID == "" || h.Config.MicrosoftClientSecret == "" {
+			return oauthProvider{}, false
+		}
+		return oauthProvider{
+			name:         "microsoft",
+			clientID:     h.Config.MicrosoftClientID,
+			clientSecret: h.Config.MicrosoftClientSecret,
+			authURL:      "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+			tokenURL:     "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+			userInfoURL:  "https://graph.microsoft.com/v1.0/me",
+			// "common" rather than a single tenant so personal accounts
+			// and any org's work accounts both work without per-tenant
+			// configuration. User.Read is what makes the access token
+			// audience-valid for the Graph /me call below.
+			scope: "openid email profile User.Read",
+		}, true
+	case "discord":
+		if h.Config.DiscordClientID == "" || h.Config.DiscordClientSecret == "" {
+			return oauthProvider{}, false
+		}
+		return oauthProvider{
+			name:         "discord",
+			clientID:     h.Config.DiscordClientID,
+			clientSecret: h.Config.DiscordClientSecret,
+			authURL:      "https://discord.com/oauth2/authorize",
+			tokenURL:     "https://discord.com/api/oauth2/token",
+			userInfoURL:  "https://discord.com/api/users/@me",
+			scope:        "identify email",
+		}, true
+	case "gitlab":
+		if h.Config.GitLabClientID == "" || h.Config.GitLabClientSecret == "" {
+			return oauthProvider{}, false
+		}
+		return oauthProvider{
+			name:         "gitlab",
+			clientID:     h.Config.GitLabClientID,
+			clientSecret: h.Config.GitLabClientSecret,
+			authURL:      "https://gitlab.com/oauth/authorize",
+			tokenURL:     "https://gitlab.com/oauth/token",
+			userInfoURL:  "https://gitlab.com/api/v4/user",
+			scope:        "read_user",
 		}, true
 	default:
 		return oauthProvider{}, false
@@ -161,6 +205,12 @@ func (h *OAuthHandlers) Callback(w http.ResponseWriter, r *http.Request, provide
 
 	tokens, err := cryden.LoginWithOAuth(r.Context(), h.Engine, p.name, externalID, email, CallerIP(r), UserAgent(r))
 	if err != nil {
+		// An account with a second factor enrolled pauses here too — an
+		// OAuth login is still a login, so it goes through the same gate
+		// and reports the pause the same way (see second_factor.go).
+		if writeTokensOrPause(w, err) {
+			return
+		}
 		var conflict *auth.ErrOAuthEmailConflict
 		if errors.As(err, &conflict) {
 			// The confirmed decision: never auto-link. Surface this
@@ -468,6 +518,54 @@ func exchangeAndFetchIdentity(r *http.Request, p oauthProvider, redirectURI, cod
 			return fmt.Sprintf("%d", info.ID), email, nil
 		}
 		return fmt.Sprintf("%d", info.ID), info.Email, nil
+	case "microsoft":
+		var info struct {
+			ID                string `json:"id"`
+			Mail              string `json:"mail"`
+			UserPrincipalName string `json:"userPrincipalName"`
+		}
+		if err := json.Unmarshal(body, &info); err != nil {
+			return "", "", err
+		}
+		// mail is the real address but is null for many personal
+		// accounts; userPrincipalName is the fallback Microsoft
+		// itself documents for exactly that case.
+		email := info.Mail
+		if email == "" {
+			email = info.UserPrincipalName
+		}
+		if email == "" {
+			return "", "", errOAuthEmailNotAvailable
+		}
+		return info.ID, email, nil
+	case "discord":
+		var info struct {
+			ID    string `json:"id"`
+			Email string `json:"email"`
+		}
+		if err := json.Unmarshal(body, &info); err != nil {
+			return "", "", err
+		}
+		if info.Email == "" {
+			return "", "", errOAuthEmailNotAvailable
+		}
+		return info.ID, info.Email, nil
+	case "gitlab":
+		var info struct {
+			ID    int64  `json:"id"`
+			Email string `json:"email"`
+		}
+		if err := json.Unmarshal(body, &info); err != nil {
+			return "", "", err
+		}
+		if info.Email == "" {
+			// /api/v4/user only returns the primary address because
+			// this handler asks for read_user; anything else means the
+			// account has no usable address, not that we should invent
+			// one from the username.
+			return "", "", errOAuthEmailNotAvailable
+		}
+		return fmt.Sprintf("%d", info.ID), info.Email, nil
 	default:
 		return "", "", errOAuthProviderNotConfigured
 	}
@@ -484,11 +582,15 @@ func exchangeCode(r *http.Request, p oauthProvider, redirectURI, code string) (s
 		"redirect_uri":  {redirectURI},
 		"grant_type":    {"authorization_code"},
 	}
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, p.tokenURL, nil)
+	// RFC 6749 §4.1.3 puts these parameters in the POST body, and that
+	// is what Microsoft and Discord require — query parameters are not
+	// accepted there. Google and GitHub accept the body form too, so
+	// there is one code path rather than a per-provider branch.
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, p.tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", err
 	}
-	req.URL.RawQuery = form.Encode() // both providers accept this as query or form body; query keeps this dependency-free
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
