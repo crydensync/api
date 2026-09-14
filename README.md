@@ -86,6 +86,12 @@ Every response follows one of two shapes:
 
 `code` is the stable string to branch on programmatically. `message` is for humans — never parse it.
 
+One error carries a third, optional key: `password_policy_violation` includes a `details` array holding every broken rule at once as stable codes (`min_length`, `max_length`, `require_uppercase`, `require_lowercase`, `require_digit`, `require_symbol`), so a client can list them together instead of discovering one per submit. Every other error has exactly the two keys above.
+
+```json
+{ "error": { "code": "password_policy_violation", "message": "password does not meet the required policy", "details": ["min_length", "require_digit"] } }
+```
+
 ## Endpoints
 
 ```
