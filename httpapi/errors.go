@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/crydensync/cryden/v2"
 	"github.com/crydensync/cryden/v2/auth"
 	"github.com/crydensync/cryden/v2/store"
 	"github.com/crydensync/cryden/v2/token"
@@ -95,6 +96,32 @@ func mapError(err error) apiError {
 		return apiError{http.StatusUnauthorized, "invalid_access_token", "access token is invalid or expired"}
 	case errors.Is(err, auth.ErrOAuthIdentityAlreadyLinked):
 		return apiError{http.StatusConflict, "oauth_identity_already_linked", "this provider account is already linked to a different user"}
+	case errors.Is(err, auth.ErrTOTPNotEnabled):
+		return apiError{http.StatusBadRequest, "totp_not_enabled", "TOTP is not enabled for this account"}
+	case errors.Is(err, auth.ErrTOTPAlreadyEnabled):
+		return apiError{http.StatusConflict, "totp_already_enabled", "TOTP is already enabled for this account"}
+	case errors.Is(err, auth.ErrInvalidTOTPCode):
+		return apiError{http.StatusUnauthorized, "invalid_totp_code", "that code is invalid or has expired"}
+	case errors.Is(err, auth.ErrInvalidPendingLogin):
+		return apiError{http.StatusUnauthorized, "invalid_pending_login", "this login attempt has expired — please log in again"}
+	case errors.Is(err, auth.ErrNoPasskeysEnrolled):
+		return apiError{http.StatusBadRequest, "no_passkeys_enrolled", "no passkeys are registered for this account"}
+	case errors.Is(err, auth.ErrInvalidWebAuthnResponse):
+		return apiError{http.StatusUnauthorized, "invalid_passkey_response", "the passkey response could not be verified — please try again"}
+	case errors.Is(err, auth.ErrInvalidCeremonyToken):
+		return apiError{http.StatusBadRequest, "invalid_ceremony_token", "this passkey ceremony has expired — please start again"}
+	// The four "not configured" sentinels below mean this deployment has
+	// not enabled that feature, not that the caller did anything wrong.
+	// 404 rather than 500 so a client can hide the option instead of
+	// reporting a server fault, matching oauth_provider_not_configured.
+	case errors.Is(err, cryden.ErrTOTPNotConfigured):
+		return apiError{http.StatusNotFound, "totp_not_configured", "TOTP is not enabled on this deployment"}
+	case errors.Is(err, cryden.ErrWebAuthnNotConfigured):
+		return apiError{http.StatusNotFound, "passkeys_not_configured", "passkeys are not enabled on this deployment"}
+	case errors.Is(err, cryden.ErrMagicLinkNotConfigured):
+		return apiError{http.StatusNotFound, "magic_link_not_configured", "magic-link login is not enabled on this deployment"}
+	case errors.Is(err, cryden.ErrRecoveryCodesNotConfigured):
+		return apiError{http.StatusNotFound, "recovery_codes_not_configured", "recovery codes are not enabled on this deployment"}
 	default:
 		// Struct-typed errors (not plain sentinels) need errors.As,
 		// not errors.Is — ErrOAuthEmailConflict carries Email and
