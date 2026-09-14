@@ -9,10 +9,21 @@ genuinely unspecified, make the most reasonable call consistent with
 `CODEX.md`'s ownership rules and note the assumption in `PROGRESS.md`.
 
 Tier 0 and Tier 0.5 are done — see `CURRENT-STATE.md`.
+Tier 1 is done **except Apple** — see the status note under Tier 1 and
+`PROGRESS.md`'s 2026-09-14 entry for exactly what is left.
 
 ---
 
 ## Tier 1 — auth methods
+
+> **Status: every sub-item below is built and on `feat/tier1-auth-methods`
+> except Apple**, which is deliberately still open (see the Apple bullet
+> at the end of this section — it is not another mechanical provider
+> case). The engine-side pieces are wired and `go build`/`go test` are
+> clean; the DB-backed smoke test has not been run here (no Postgres in
+> this sandbox), so a first run against a real database is still owed
+> before this counts as verified end to end — `PROGRESS.md` says so
+> plainly, per `CODEX.md`'s verification rule.
 
 Each of these mirrors an existing engine feature that already has a
 full smoke-test-verified implementation in cryden. The work here is
@@ -27,6 +38,23 @@ this repo's own sequence (`004` through `008` — `003` is already
 as the existing `001`/`002` copies. Check cryden's own
 `store/postgres/migrations/` for the exact source content; don't
 reconstruct from memory.
+
+`004`-`008` are copied; the TOTP/passkey/recovery-code endpoints,
+the two magic-link endpoints, the shared paused-login response and the
+three mechanical OAuth providers are built. Notes worth keeping:
+
+- TOTP, WebAuthn and recovery codes are gated on `ENCRYPTION_KEY` in
+  `main.go` (cryden refuses to build an engine with either store set and
+  no key). Unconfigured means `404` per request, not a refusal to start.
+- A login that pauses for a second factor had to become a `200`
+  (`second_factor_required` + `pending_token` + `methods`) — repo-wide
+  that is the shape `/v1/login`, the OAuth callback and
+  `/v1/magic-link/complete` all use now. This was not spelled out in the
+  original spec below; it is the one place the spec's "translation only"
+  framing needed a real decision, and it is recorded in `PROGRESS.md`.
+- The code-for-token exchange moved to a POST form body (RFC 6749
+  §4.1.3) because Microsoft and Discord require it; Google and GitHub
+  accept it, so there is one path rather than a per-provider branch.
 
 ### TOTP
 - `POST /v1/totp/enroll` (auth required) → `cryden.EnrollTOTP`, return
@@ -90,6 +118,15 @@ Google/GitHub already use.
   sends the user's name on the *first* authorization ever, never
   again. Budget real time for this one; don't estimate it at the same
   size as the other three.
+
+**Still open in Tier 1: Apple only.** The other three providers ship in
+`feat/tier1-auth-methods`. Apple needs: an ES256 client-secret JWT
+signed with a console key (so a private key in config, not a static
+secret), reading the email from the token endpoint's signed `id_token`
+(which means verifying it against Apple's JWKS, not parsing it
+unverified), and the callback-URL shape Apple requires. Its own branch
+or its own commit, and it cannot be smoke-test-verified without real
+Apple credentials — say so rather than implying otherwise.
 
 ---
 
