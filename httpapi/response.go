@@ -2,8 +2,11 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
+
+	"github.com/crydensync/cryden/v2/auth"
 )
 
 func writeData(w http.ResponseWriter, status int, data any) {
@@ -20,11 +23,19 @@ func writeErr(w http.ResponseWriter, err error) {
 	if apiErr.Status == http.StatusInternalServerError {
 		log.Printf("internal error: %v", err)
 	}
+	errBody := map[string]any{"code": apiErr.Code, "message": apiErr.Message}
+	// A password-policy violation carries every broken rule as stable
+	// strings, deliberately so a client can render them together instead
+	// of parsing prose. Read off the error rather than threaded through
+	// mapError's (status, code, message) triple, which every other error
+	// still fits exactly as before.
+	var policy *auth.ErrPasswordPolicyViolation
+	if errors.As(err, &policy) && len(policy.Violations) > 0 {
+		errBody["details"] = policy.Violations
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(apiErr.Status)
-	json.NewEncoder(w).Encode(map[string]any{
-		"error": map[string]string{"code": apiErr.Code, "message": apiErr.Message},
-	})
+	json.NewEncoder(w).Encode(map[string]any{"error": errBody})
 }
 
 // writeBadRequest is for request-parsing failures — these never come

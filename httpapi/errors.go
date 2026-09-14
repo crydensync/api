@@ -110,6 +110,8 @@ func mapError(err error) apiError {
 		return apiError{http.StatusUnauthorized, "invalid_passkey_response", "the passkey response could not be verified — please try again"}
 	case errors.Is(err, auth.ErrInvalidCeremonyToken):
 		return apiError{http.StatusBadRequest, "invalid_ceremony_token", "this passkey ceremony has expired — please start again"}
+	case errors.Is(err, auth.ErrPasswordBreached):
+		return apiError{http.StatusBadRequest, "password_breached", "this password has appeared in a known data breach and cannot be used"}
 	// The four "not configured" sentinels below mean this deployment has
 	// not enabled that feature, not that the caller did anything wrong.
 	// 404 rather than 500 so a client can hide the option instead of
@@ -127,6 +129,15 @@ func mapError(err error) apiError {
 		// not errors.Is — ErrOAuthEmailConflict carries Email and
 		// Provider that the client needs, so it can't just be a case
 		// in the switch above like the sentinel errors.
+		// Struct-typed for the same reason as ErrOAuthEmailConflict
+		// below: it carries every violated rule at once (stable codes
+		// like "min_length"), and writeErr reads them back off the error
+		// itself — see its details handling, which is why nothing needs
+		// to be added to this table for them to reach the client.
+		var policy *auth.ErrPasswordPolicyViolation
+		if errors.As(err, &policy) {
+			return apiError{http.StatusBadRequest, "password_policy_violation", "password does not meet the required policy"}
+		}
 		var conflict *auth.ErrOAuthEmailConflict
 		if errors.As(err, &conflict) {
 			return apiError{
