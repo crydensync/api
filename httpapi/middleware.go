@@ -60,6 +60,38 @@ func UserIDFromContext(r *http.Request) string {
 	return id
 }
 
+// RequireAdmin verifies the Bearer access token exactly like
+// RequireAuth, and additionally requires its "role" claim to be
+// "admin". That claim is set by main.go's AccessTokenClaims provider,
+// backed by operator.Store — an ordinary end user's token carries no
+// role claim at all, so an unknown user, a revoked operator, and
+// someone who was simply never an operator all fail identically here.
+// There is deliberately no separate "not an operator, but otherwise
+// valid" response — that distinction is not the caller's to learn.
+func RequireAdmin(engine *cryden.Engine, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		authHeader := r.Header.Get("Authorization")
+		if !strings.HasPrefix(authHeader, "Bearer ") {
+			writeErr(w, errMissingAuthHeader)
+			return
+		}
+		tok := strings.TrimPrefix(authHeader, "Bearer ")
+
+		userID, claims, err := cryden.VerifyTokenWithClaims(engine, tok)
+		if err != nil {
+			writeErr(w, err)
+			return
+		}
+		if role, _ := claims["role"].(string); role != "admin" {
+			writeErr(w, errNotOperator)
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), userIDContextKey, userID)
+		next(w, r.WithContext(ctx))
+	}
+}
+
 // WithCORS restricts which origins may call this API. allowedOrigins
 // should be an explicit list from config — never "*" for an API that
 // handles auth tokens and cookies-adjacent credentials.

@@ -29,6 +29,12 @@ type apiError struct {
 // RequireAuth can route it through the same writeErr/mapError path.
 var errMissingAuthHeader = errors.New("missing or malformed Authorization header")
 
+// errNotOperator is returned by RequireAdmin when a valid, verified
+// token has no "role" claim of "admin" — an ordinary end user, a
+// revoked operator, and an unrecognized user all look identical here
+// on purpose (see operator/store.go and RequireAdmin).
+var errNotOperator = errors.New("this account does not have console operator access")
+
 // errEdgeRateLimited is the coarse, per-IP, whole-API rate limit —
 // distinct from auth.ErrRateLimited, which is the engine's own
 // per-user login/signup limiter. Both surface the same "rate_limited"
@@ -48,6 +54,8 @@ func mapError(err error) apiError {
 	switch {
 	case errors.Is(err, errMissingAuthHeader):
 		return apiError{http.StatusUnauthorized, "missing_auth_header", "missing or malformed Authorization header"}
+	case errors.Is(err, errNotOperator):
+		return apiError{http.StatusForbidden, "not_operator", "this account does not have console operator access"}
 	case errors.Is(err, errEdgeRateLimited):
 		return apiError{http.StatusTooManyRequests, "rate_limited", "too many requests, please slow down"}
 	case errors.Is(err, errOAuthProviderNotConfigured):

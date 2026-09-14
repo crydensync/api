@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"net/http"
@@ -9,9 +10,11 @@ import (
 
 	"github.com/crydensync/cryden/v2"
 	"github.com/crydensync/cryden/v2/store/postgres"
+	"github.com/crydensync/cryden/v2/token"
 
 	"github.com/crydensync/api/config"
 	"github.com/crydensync/api/httpapi"
+	"github.com/crydensync/api/operator"
 )
 
 func main() {
@@ -29,6 +32,8 @@ func main() {
 		log.Fatalf("failed to ping DB: %v", err)
 	}
 
+	operators := operator.NewStore(db)
+
 	engine, err := cryden.New(cryden.Config{
 		JWTSecret:      cfg.JWTSecret,
 		Users:          postgres.NewUserStore(db),
@@ -38,6 +43,21 @@ func main() {
 		EmailSender:    &consoleEmailSender{}, // dev stand-in — see email_sender.go
 		AccessTokenTTL: cfg.AccessTokenTTL,
 		OAuth:          postgres.NewOAuthStore(db),
+
+		// Attaches a "role" claim for console operators only — an
+		// ordinary end user's token gets no extra claims at all, not
+		// even role="user". See operator/store.go for why this is a
+		// separate table rather than anything on cryden's own User.
+		AccessTokenClaims: token.ClaimsFunc(func(ctx context.Context, userID string) (map[string]any, error) {
+			role, isOperator, err := operators.RoleFor(ctx, userID)
+			if err != nil {
+				return nil, err
+			}
+			if !isOperator {
+				return nil, nil
+			}
+			return map[string]any{"role": role}, nil
+		}),
 	})
 	if err != nil {
 		log.Fatalf("failed to construct cryden engine: %v", err)
