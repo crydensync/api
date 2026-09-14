@@ -34,15 +34,16 @@ func main() {
 
 	operators := operator.NewStore(db)
 
-	engine, err := cryden.New(cryden.Config{
-		JWTSecret:      cfg.JWTSecret,
-		Users:          postgres.NewUserStore(db),
-		Sessions:       postgres.NewSessionStore(db),
-		Audit:          postgres.NewAuditStore(db),
-		Verifications:  postgres.NewVerificationStore(db),
-		EmailSender:    &consoleEmailSender{}, // dev stand-in — see email_sender.go
-		AccessTokenTTL: cfg.AccessTokenTTL,
-		OAuth:          postgres.NewOAuthStore(db),
+	engineCfg := cryden.Config{
+		JWTSecret:       cfg.JWTSecret,
+		Users:           postgres.NewUserStore(db),
+		Sessions:        postgres.NewSessionStore(db),
+		Audit:           postgres.NewAuditStore(db),
+		Verifications:   postgres.NewVerificationStore(db),
+		EmailSender:     &consoleEmailSender{},                         // dev stand-in — see email_sender.go
+		MagicLinkSender: &consoleMagicLinkSender{BaseURL: cfg.BaseURL}, // dev stand-in — see email_sender.go
+		AccessTokenTTL:  cfg.AccessTokenTTL,
+		OAuth:           postgres.NewOAuthStore(db),
 
 		// Attaches a "role" claim for console operators only — an
 		// ordinary end user's token gets no extra claims at all, not
@@ -58,7 +59,37 @@ func main() {
 			}
 			return map[string]any{"role": role}, nil
 		}),
-	})
+	}
+
+	// Second factors are all-or-nothing on ENCRYPTION_KEY: cryden refuses
+	// to build an engine with a TOTP or WebAuthn store set and no
+	// encryption key, and a half-configured deployment would be worse than
+	// one that simply reports those methods as unavailable. Unavailable is
+	// reported per-request (404, same shape as an unconfigured OAuth
+	// provider), never as a refusal to start.
+	if cfg.EncryptionKey != "" {
+		engineCfg.EncryptionKey = cfg.EncryptionKey
+		engineCfg.TOTPIssuerName = cfg.TOTPIssuerName
+		engineCfg.TOTP = postgres.NewTOTPStore(db)
+		// Recovery codes are a fallback for whichever second factor is
+		// enrolled, so they are only wired in when one can exist.
+		engineCfg.RecoveryCodes = postgres.NewRecoveryCodeStore(db)
+
+		if cfg.WebAuthnRPID != "" && cfg.WebAuthnRPDisplayName != "" && len(cfg.WebAuthnRPOrigins) > 0 {
+			engineCfg.WebAuthn = postgres.NewWebAuthnStore(db)
+			engineCfg.WebAuthnRPID = cfg.WebAuthnRPID
+			engineCfg.WebAuthnRPDisplayName = cfg.WebAuthnRPDisplayName
+			engineCfg.WebAuthnRPOrigins = cfg.WebAuthnRPOrigins
+		} else if cfg.WebAuthnRPID != "" || cfg.WebAuthnRPDisplayName != "" || len(cfg.WebAuthnRPOrigins) > 0 {
+			// Partial WebAuthn config is a deployment mistake worth
+			// saying out loud: passkeys stay off until all three are
+			// set, rather than half-working in a way that only ever
+			// shows up as a ceremony failure in the browser.
+			log.Printf("WARNING: WebAuthn disabled — passkeys need WEBAUTHN_RP_ID, WEBAUTHN_RP_DISPLAY_NAME and WEBAUTHN_RP_ORIGINS all set")
+		}
+	}
+
+	engine, err := cryden.New(engineCfg)
 	if err != nil {
 		log.Fatalf("failed to construct cryden engine: %v", err)
 	}

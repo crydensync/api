@@ -53,6 +53,11 @@ func (h *AuthHandlers) Login(w http.ResponseWriter, r *http.Request) {
 
 	tokens, err := cryden.Login(r.Context(), h.Engine, req.Email, req.Password, CallerIP(r), UserAgent(r))
 	if err != nil {
+		// An account with TOTP or a passkey enrolled pauses here instead
+		// of erroring — see second_factor.go.
+		if writeTokensOrPause(w, err) {
+			return
+		}
 		writeErr(w, err)
 		return
 	}
