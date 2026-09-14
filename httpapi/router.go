@@ -17,6 +17,10 @@ func NewRouter(engine *cryden.Engine, db *sql.DB, cfg config.Config) http.Handle
 	email := &EmailHandlers{Engine: engine}
 	health := &HealthHandler{DB: db}
 	oauth := &OAuthHandlers{Engine: engine, Config: cfg}
+	totp := &TOTPHandlers{Engine: engine}
+	passkeys := &PasskeyHandlers{Engine: engine}
+	magicLink := &MagicLinkHandlers{Engine: engine}
+	recovery := &RecoveryHandlers{Engine: engine}
 
 	mux := http.NewServeMux()
 
@@ -26,6 +30,17 @@ func NewRouter(engine *cryden.Engine, db *sql.DB, cfg config.Config) http.Handle
 	mux.HandleFunc("POST /v1/refresh", auth.Refresh)
 	mux.HandleFunc("POST /v1/email/confirm-change", email.ConfirmChange)
 	mux.HandleFunc("GET /v1/health", health.Health)
+
+	// Second-factor login completion — public for the same reason
+	// /v1/login is: this IS how the caller gets authenticated. Each of
+	// these takes the pending_token from a login that paused with a
+	// second_factor_required response.
+	mux.HandleFunc("POST /v1/login/totp", totp.Login)
+	mux.HandleFunc("POST /v1/login/passkey/begin", passkeys.LoginBegin)
+	mux.HandleFunc("POST /v1/login/passkey/finish", passkeys.LoginFinish)
+	mux.HandleFunc("POST /v1/login/recovery-code", recovery.Login)
+	mux.HandleFunc("POST /v1/magic-link/request", magicLink.Request)
+	mux.HandleFunc("POST /v1/magic-link/complete", magicLink.Complete)
 
 	// OAuth — Start and Callback are public (they're the login/signup
 	// path itself, same as /v1/login). Link requires auth since it
@@ -61,6 +76,25 @@ func NewRouter(engine *cryden.Engine, db *sql.DB, cfg config.Config) http.Handle
 	mux.HandleFunc("POST /v1/delete-account", RequireAuth(engine, account.DeleteAccount))
 
 	mux.HandleFunc("POST /v1/email/request-change", RequireAuth(engine, email.RequestChange))
+
+	// Second-factor enrollment and management. TOTP and passkeys are
+	// optional per deployment (see main.go's ENCRYPTION_KEY gate): an
+	// unconfigured one answers 404 from mapError, the same shape an
+	// unconfigured OAuth provider already uses — the routes exist either
+	// way, so a client never has to discover availability from a routing
+	// table it can't see.
+	mux.HandleFunc("POST /v1/totp/enroll", RequireAuth(engine, totp.Enroll))
+	mux.HandleFunc("POST /v1/totp/confirm", RequireAuth(engine, totp.Confirm))
+	mux.HandleFunc("POST /v1/totp/disable", RequireAuth(engine, totp.Disable))
+
+	mux.HandleFunc("POST /v1/passkeys/register/begin", RequireAuth(engine, passkeys.RegisterBegin))
+	mux.HandleFunc("POST /v1/passkeys/register/finish", RequireAuth(engine, passkeys.RegisterFinish))
+	mux.HandleFunc("GET /v1/passkeys", RequireAuth(engine, passkeys.List))
+	mux.HandleFunc("DELETE /v1/passkeys/{credentialID}", RequireAuth(engine, func(w http.ResponseWriter, r *http.Request) {
+		passkeys.Delete(w, r, r.PathValue("credentialID"))
+	}))
+
+	mux.HandleFunc("POST /v1/recovery-codes/generate", RequireAuth(engine, recovery.Generate))
 
 	return mux
 }
