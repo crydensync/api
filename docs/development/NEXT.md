@@ -9,21 +9,23 @@ genuinely unspecified, make the most reasonable call consistent with
 `CODEX.md`'s ownership rules and note the assumption in `PROGRESS.md`.
 
 Tier 0 and Tier 0.5 are done — see `CURRENT-STATE.md`.
-Tier 1 is done **except Apple** — see the status note under Tier 1 and
-`PROGRESS.md`'s 2026-09-14 entry for exactly what is left.
+Tier 1 is done — see the status note under Tier 1 and `PROGRESS.md`'s
+2026-09-14 entries for how far it is verified.
 
 ---
 
 ## Tier 1 — auth methods
 
-> **Status: every sub-item below is built and on `feat/tier1-auth-methods`
-> except Apple**, which is deliberately still open (see the Apple bullet
-> at the end of this section — it is not another mechanical provider
-> case). The engine-side pieces are wired and `go build`/`go test` are
-> clean; the DB-backed smoke test has not been run here (no Postgres in
-> this sandbox), so a first run against a real database is still owed
-> before this counts as verified end to end — `PROGRESS.md` says so
-> plainly, per `CODEX.md`'s verification rule.
+> **Status: every sub-item below is built, Apple included, on
+> `feat/tier1-auth-methods`.** `go build`/`go vet`/`go test` are clean
+> and the new mapping/`writeErr` behaviour is unit-tested, including
+> Apple's client-secret signing and its id_token verification
+> (signature, audience, issuer, expiry, algorithm) against a local JWKS.
+> What is still owed: a first DB-backed smoke-test run (no Postgres in
+> this sandbox), a live Apple round trip (no Apple credentials here), and
+> the WebAuthn ceremonies, which need a real browser authenticator.
+> `PROGRESS.md` says all of that plainly, per `CODEX.md`'s verification
+> rule, rather than counting green unit tests as end-to-end coverage.
 
 Each of these mirrors an existing engine feature that already has a
 full smoke-test-verified implementation in cryden. The work here is
@@ -119,14 +121,21 @@ Google/GitHub already use.
   again. Budget real time for this one; don't estimate it at the same
   size as the other three.
 
-**Still open in Tier 1: Apple only.** The other three providers ship in
-`feat/tier1-auth-methods`. Apple needs: an ES256 client-secret JWT
-signed with a console key (so a private key in config, not a static
-secret), reading the email from the token endpoint's signed `id_token`
-(which means verifying it against Apple's JWKS, not parsing it
-unverified), and the callback-URL shape Apple requires. Its own branch
-or its own commit, and it cannot be smoke-test-verified without real
-Apple credentials — say so rather than implying otherwise.
+**Apple: done** (its own commit, `httpapi/apple.go` + `apple_test.go`).
+It needed exactly what was foreseen here: an ES256 client-secret JWT
+signed per exchange with the console key, and the identity read from the
+token response's `id_token` after verifying it against Apple's JWKS.
+Two details were decided rather than assumed, and are recorded in
+`PROGRESS.md`:
+
+- `response_mode=query` so the existing GET callback route works
+  unchanged. The consequence is that Apple's one-time `user` payload
+  (name, first authorization only) is not captured — this repo stores the
+  id_token's email, not names.
+- No `nonce` parameter. Apple requires one for the hybrid/implicit flow;
+  this is the authorization-code flow, where the code is single-use and
+  bound to this client and the redirect already carries a CSRF `state`
+  cookie. Worth revisiting only if a hybrid flow is ever added.
 
 ---
 
