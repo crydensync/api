@@ -35,6 +35,21 @@ type Config struct {
 	GitLabClientID        string
 	GitLabClientSecret    string
 
+	// Apple is the one provider that needs more than an ID and a secret:
+	// its client "secret" is a short-lived ES256 JWT this repo signs
+	// itself, with a key downloaded from Apple's developer console, so
+	// the signing material is configuration here rather than a static
+	// string. All four must be set for the provider to be available.
+	//
+	// AppleClientID is the Services ID (e.g. "com.example.web"), not the
+	// app bundle ID. ApplePrivateKey is the .p8 file's contents; because
+	// a PEM cannot sit on one .env line, literal "\n" sequences are
+	// converted to real newlines when this is loaded.
+	AppleClientID   string
+	AppleTeamID     string
+	AppleKeyID      string
+	ApplePrivateKey string
+
 	// EncryptionKey encrypts TOTP secrets and WebAuthn ceremony state at
 	// rest. Required only if TOTP or WebAuthn is enabled — cryden refuses
 	// to construct an engine with either store set and this empty, since a
@@ -123,6 +138,17 @@ func Load() (Config, error) {
 	cfg.DiscordClientSecret = os.Getenv("DISCORD_CLIENT_SECRET")
 	cfg.GitLabClientID = os.Getenv("GITLAB_CLIENT_ID")
 	cfg.GitLabClientSecret = os.Getenv("GITLAB_CLIENT_SECRET")
+	cfg.AppleClientID = os.Getenv("APPLE_CLIENT_ID")
+	cfg.AppleTeamID = os.Getenv("APPLE_TEAM_ID")
+	cfg.AppleKeyID = os.Getenv("APPLE_KEY_ID")
+	// .env files are line-oriented, so a PEM arrives with its newlines
+	// written as \n. Only unescape when the value looks like it
+	// needs it, so a deployment that already passes a real multiline
+	// value through its own secret manager is left alone.
+	cfg.ApplePrivateKey = os.Getenv("APPLE_PRIVATE_KEY")
+	if strings.Contains(cfg.ApplePrivateKey, `\n`) {
+		cfg.ApplePrivateKey = strings.ReplaceAll(cfg.ApplePrivateKey, `\n`, "\n")
+	}
 
 	// Second factors are optional too, and for the same reason: a
 	// deployment that hasn't set ENCRYPTION_KEY should still run fine for

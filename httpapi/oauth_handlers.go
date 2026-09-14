@@ -50,6 +50,15 @@ type oauthProvider struct {
 	tokenURL     string
 	userInfoURL  string
 	scope        string
+	// extraAuthParams are merged into the authorization redirect's query.
+	// Only Apple needs one (it is the only provider whose response mode
+	// this handler has to pin down); everyone else leaves it empty.
+	extraAuthParams url.Values
+	// Apple's signing material — empty for every other provider, which
+	// use a static clientSecret instead. See apple.go.
+	appleTeamID     string
+	appleKeyID      string
+	applePrivateKey string
 }
 
 type OAuthHandlers struct {
@@ -128,9 +137,57 @@ func (h *OAuthHandlers) provider(name string) (oauthProvider, bool) {
 			userInfoURL:  "https://gitlab.com/api/v4/user",
 			scope:        "read_user",
 		}, true
+	case "apple":
+		// All four values are required: Apple's "client secret" is a JWT
+		// this repo signs with AppleKeyID/ApplePrivateKey for the team
+		// named by AppleTeamID, so a half-configured Apple is not a
+		// provider that half works, it is one that cannot sign at all.
+		if h.Config.AppleClientID == "" || h.Config.AppleTeamID == "" || h.Config.AppleKeyID == "" || h.Config.ApplePrivateKey == "" {
+			return oauthProvider{}, false
+		}
+		return oauthProvider{
+			name:     "apple",
+			clientID: h.Config.AppleClientID,
+			// Deliberately no clientSecret — see apple.go's
+			// appleClientSecret, which signs a fresh one per exchange.
+			authURL:  appleIssuer + "/auth/authorize",
+			tokenURL: appleIssuer + "/auth/token",
+			// Apple has no userinfo endpoint: the identity arrives in the
+			// token response's signed id_token instead (see
+			// exchangeAndFetchAppleIdentity).
+			userInfoURL: "",
+			scope:       "name email",
+			// query, not form_post: this handler's callback is a GET
+			// redirect, and query mode keeps that route unchanged. The
+			// name/email Apple only ever sends on a first authorization
+			// arrives in the `user` form field under form_post, which
+			// this repo does not need — it stores the id_token's email.
+			extraAuthParams: url.Values{"response_mode": {"query"}},
+			appleTeamID:     h.Config.AppleTeamID,
+			appleKeyID:      h.Config.AppleKeyID,
+			applePrivateKey: h.Config.ApplePrivateKey,
+		}, true
 	default:
 		return oauthProvider{}, false
 	}
+}
+
+// authQuery builds the authorization redirect's query. Kept as one
+// function rather than inline in both flows so a provider-specific
+// parameter (see oauthProvider.extraAuthParams) cannot be added to one
+// flow and forgotten in the other.
+func authQuery(p oauthProvider, redirectURI, state string) url.Values {
+	q := url.Values{
+		"client_id":     {p.clientID},
+		"redirect_uri":  {redirectURI},
+		"response_type": {"code"},
+		"scope":         {p.scope},
+		"state":         {state},
+	}
+	for k, values := range p.extraAuthParams {
+		q[k] = values
+	}
+	return q
 }
 
 func (h *OAuthHandlers) callbackURL(providerName string) string {
@@ -162,14 +219,7 @@ func (h *OAuthHandlers) Start(w http.ResponseWriter, r *http.Request, providerNa
 		MaxAge:   600, // 10 minutes — plenty for a consent-screen round trip
 	})
 
-	q := url.Values{
-		"client_id":     {p.clientID},
-		"redirect_uri":  {h.callbackURL(p.name)},
-		"response_type": {"code"},
-		"scope":         {p.scope},
-		"state":         {state},
-	}
-	http.Redirect(w, r, p.authURL+"?"+q.Encode(), http.StatusFound)
+	http.Redirect(w, r, p.authURL+"?"+authQuery(p, h.callbackURL(p.name), state).Encode(), http.StatusFound)
 }
 
 // Callback receives the provider's redirect, exchanges the code,
@@ -268,14 +318,7 @@ func (h *OAuthHandlers) LinkStart(w http.ResponseWriter, r *http.Request, provid
 		MaxAge:   600,
 	})
 
-	q := url.Values{
-		"client_id":     {p.clientID},
-		"redirect_uri":  {h.linkCallbackURL(p.name)},
-		"response_type": {"code"},
-		"scope":         {p.scope},
-		"state":         {state},
-	}
-	http.Redirect(w, r, p.authURL+"?"+q.Encode(), http.StatusFound)
+	http.Redirect(w, r, p.authURL+"?"+authQuery(p, h.linkCallbackURL(p.name), state).Encode(), http.StatusFound)
 }
 
 // LinkCallback receives the provider's redirect for the linking flow.
@@ -464,7 +507,14 @@ func clearStateCookie(w http.ResponseWriter) {
 // above it is either request-shaped (redirect/state) or calls into
 // the engine.
 func exchangeAndFetchIdentity(r *http.Request, p oauthProvider, redirectURI, code string) (externalID, email string, err error) {
-	tokenResp, err := exchangeCode(r, p, redirectURI, code)
+	// Apple is the one provider that does not follow the others' shape:
+	// its client secret is signed per exchange, and there is no userinfo
+	// call to make afterwards — the identity is in the token response.
+	if p.name == "apple" {
+		return exchangeAndFetchAppleIdentity(r, p, redirectURI, code)
+	}
+
+	tokenResp, err := exchangeCode(r, p, redirectURI, code, p.clientSecret)
 	if err != nil {
 		return "", "", err
 	}
@@ -473,7 +523,7 @@ func exchangeAndFetchIdentity(r *http.Request, p oauthProvider, redirectURI, cod
 	if err != nil {
 		return "", "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+tokenResp)
+	req.Header.Set("Authorization", "Bearer "+tokenResp.AccessToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return "", "", err
@@ -511,7 +561,7 @@ func exchangeAndFetchIdentity(r *http.Request, p oauthProvider, redirectURI, cod
 			// address instead comes from /user/emails, which needs
 			// the same token and the same scope this handler already
 			// requests (user:email).
-			email, err := fetchGitHubPrimaryEmail(r, tokenResp)
+			email, err := fetchGitHubPrimaryEmail(r, tokenResp.AccessToken)
 			if err != nil {
 				return "", "", err
 			}
@@ -571,13 +621,52 @@ func exchangeAndFetchIdentity(r *http.Request, p oauthProvider, redirectURI, cod
 	}
 }
 
+// exchangeAndFetchAppleIdentity is Apple's version of the step above.
+// Apple is the only provider whose client secret is not a static string
+// (it is an ES256 JWT signed here) and the only one with no userinfo
+// endpoint (the id_token in the token response carries the identity, and
+// has to be verified against Apple's signing keys rather than decoded —
+// see verifyAppleIDToken).
+func exchangeAndFetchAppleIdentity(r *http.Request, p oauthProvider, redirectURI, code string) (externalID, email string, err error) {
+	secret, err := appleClientSecret(p)
+	if err != nil {
+		return "", "", err
+	}
+
+	tokenResp, err := exchangeCode(r, p, redirectURI, code, secret)
+	if err != nil {
+		return "", "", err
+	}
+	if tokenResp.IDToken == "" {
+		return "", "", errOAuthIdentityVerificationFailed
+	}
+
+	sub, email, err := verifyAppleIDToken(r.Context(), tokenResp.IDToken, p.clientID)
+	if err != nil {
+		return "", "", err
+	}
+	if email == "" {
+		return "", "", errOAuthEmailNotAvailable
+	}
+	return sub, email, nil
+}
+
+// oauthTokenResponse is what a provider's token endpoint gives back.
+// Only these two fields are ever read: the access token for the one
+// immediate userinfo call, and Apple's id_token. Nothing here is stored
+// — this API keeps no provider tokens.
+type oauthTokenResponse struct {
+	AccessToken string `json:"access_token"`
+	IDToken     string `json:"id_token"`
+}
+
 // exchangeCode trades the authorization code for a provider access
-// token. Returns just the token string — this handler only ever needs
-// it to make the one immediate userinfo call, never stores it.
-func exchangeCode(r *http.Request, p oauthProvider, redirectURI, code string) (string, error) {
+// token. clientSecret is passed in rather than read off p because Apple
+// derives one per exchange; every other provider passes p.clientSecret.
+func exchangeCode(r *http.Request, p oauthProvider, redirectURI, code, clientSecret string) (oauthTokenResponse, error) {
 	form := url.Values{
 		"client_id":     {p.clientID},
-		"client_secret": {p.clientSecret},
+		"client_secret": {clientSecret},
 		"code":          {code},
 		"redirect_uri":  {redirectURI},
 		"grant_type":    {"authorization_code"},
@@ -588,32 +677,30 @@ func exchangeCode(r *http.Request, p oauthProvider, redirectURI, code string) (s
 	// there is one code path rather than a per-provider branch.
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, p.tokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		return "", err
+		return oauthTokenResponse{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", err
+		return oauthTokenResponse{}, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
+		return oauthTokenResponse{}, err
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("httpapi: oauth token exchange failed: status %d", resp.StatusCode)
+		return oauthTokenResponse{}, fmt.Errorf("httpapi: oauth token exchange failed: status %d", resp.StatusCode)
 	}
 
-	var tokenResp struct {
-		AccessToken string `json:"access_token"`
-	}
+	var tokenResp oauthTokenResponse
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
-		return "", err
+		return oauthTokenResponse{}, err
 	}
 	if tokenResp.AccessToken == "" {
-		return "", fmt.Errorf("httpapi: oauth token exchange returned no access_token")
+		return oauthTokenResponse{}, fmt.Errorf("httpapi: oauth token exchange returned no access_token")
 	}
-	return tokenResp.AccessToken, nil
+	return tokenResp, nil
 }
