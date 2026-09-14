@@ -49,6 +49,7 @@ var errOAuthProviderNotConfigured = errors.New("oauth provider not configured")
 var errOAuthStateMismatch = errors.New("oauth state parameter missing or mismatched")
 var errOAuthEmailNotAvailable = errors.New("oauth provider did not return a usable email address")
 var errOAuthLinkNotConfigured = errors.New("oauth linking is not available: server is missing a signing secret")
+var errOAuthIdentityVerificationFailed = errors.New("could not verify the identity the provider returned")
 var errOAuthLinkSessionMissing = errors.New("oauth link session missing, expired, or tampered with — please retry")
 
 func mapError(err error) apiError {
@@ -65,6 +66,8 @@ func mapError(err error) apiError {
 		return apiError{http.StatusBadRequest, "oauth_state_mismatch", "oauth state parameter missing or mismatched — please retry the login"}
 	case errors.Is(err, errOAuthEmailNotAvailable):
 		return apiError{http.StatusBadRequest, "oauth_email_not_available", "could not retrieve a usable email address from the provider"}
+	case errors.Is(err, errOAuthIdentityVerificationFailed):
+		return apiError{http.StatusBadRequest, "oauth_identity_verification_failed", "could not verify the identity the provider returned — please try again"}
 	case errors.Is(err, errOAuthLinkNotConfigured):
 		return apiError{http.StatusInternalServerError, "oauth_link_not_configured", "oauth linking is not available on this deployment"}
 	case errors.Is(err, errOAuthLinkSessionMissing):
