@@ -17,6 +17,7 @@ import (
 	"github.com/crydensync/api/config"
 	"github.com/crydensync/api/httpapi"
 	"github.com/crydensync/api/operator"
+	"github.com/crydensync/api/templates"
 )
 
 func main() {
@@ -36,16 +37,35 @@ func main() {
 
 	operators := operator.NewStore(db)
 
+	// Email templates are optional and entirely this repo's: cryden owns
+	// no message copy. An unset EMAIL_TEMPLATE_DIR leaves both senders
+	// printing their own built-in line, byte for byte as before.
+	var emailTemplates *templates.Set
+	if cfg.EmailTemplateDir != "" {
+		emailTemplates, err = templates.Load(cfg.EmailTemplateDir)
+		if err != nil {
+			log.Fatalf("invalid EMAIL_TEMPLATE_DIR: %v", err)
+		}
+		log.Printf("email templates loaded from %s", cfg.EmailTemplateDir)
+	}
+
 	engineCfg := cryden.Config{
 		JWTSecret:       cfg.JWTSecret,
 		Users:           postgres.NewUserStore(db),
 		Sessions:        postgres.NewSessionStore(db),
 		Audit:           postgres.NewAuditStore(db),
 		Verifications:   postgres.NewVerificationStore(db),
-		EmailSender:     &consoleEmailSender{},                         // dev stand-in — see email_sender.go
-		MagicLinkSender: &consoleMagicLinkSender{BaseURL: cfg.BaseURL}, // dev stand-in — see email_sender.go
+		EmailSender:     &consoleEmailSender{Templates: emailTemplates},                           // dev stand-in — see email_sender.go
+		MagicLinkSender: &consoleMagicLinkSender{BaseURL: cfg.BaseURL, Templates: emailTemplates}, // dev stand-in — see email_sender.go
 		AccessTokenTTL:  cfg.AccessTokenTTL,
 		OAuth:           postgres.NewOAuthStore(db),
+
+		// API keys are always wired: a machine credential is part of the
+		// API surface this repo offers, not a second factor a deployment
+		// opts into. The prefix is the non-secret label that makes a key
+		// leaked into a commit greppable.
+		APIKeys:      postgres.NewAPIKeyStore(db),
+		APIKeyPrefix: cfg.APIKeyPrefix,
 
 		// Attaches a "role" claim for console operators only — an
 		// ordinary end user's token gets no extra claims at all, not
@@ -61,6 +81,22 @@ func main() {
 			}
 			return map[string]any{"role": role}, nil
 		}),
+	}
+
+	// Password hashing. Leaving Hasher unset is what selects bcrypt — the
+	// engine builds its own default from BcryptCost. Selecting argon2id
+	// here is the whole switch: cryden wraps whichever hasher it holds in
+	// a MultiHasher that reads the verifier off each stored hash, so
+	// changing this rewrites hashes one successful login at a time and
+	// never invalidates a credential.
+	if cfg.PasswordHasher == config.PasswordHasherArgon2id {
+		hasher, err := security.NewArgon2idHasher(cfg.Argon2idParams)
+		if err != nil {
+			log.Fatalf("invalid Argon2id parameters: %v", err)
+		}
+		engineCfg.Hasher = hasher
+		log.Printf("new password hashes are written with Argon2id (memory %d KiB, iterations %d, parallelism %d)",
+			cfg.Argon2idParams.Memory, cfg.Argon2idParams.Iterations, cfg.Argon2idParams.Parallelism)
 	}
 
 	// Second factors are all-or-nothing on ENCRYPTION_KEY: cryden refuses
