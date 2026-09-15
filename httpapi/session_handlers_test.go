@@ -10,6 +10,7 @@ import (
 
 	"github.com/crydensync/cryden/v2"
 	"github.com/crydensync/cryden/v2/store/memory"
+	"github.com/crydensync/cryden/v2/token"
 )
 
 // stubMailSender stands in for a real console/SES/SMTP implementation.
@@ -32,7 +33,16 @@ const chromeOnMacOS = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebK
 // actual response shape testable here.
 func newTestEngine(t *testing.T) *cryden.Engine {
 	t.Helper()
-	engine, err := cryden.New(cryden.Config{
+	return newTestEngineWithClaims(t, nil)
+}
+
+// newTestEngineWithClaims is newTestEngine with the host's own
+// token.ClaimsProvider wired in — the same mechanism main.go uses to put a
+// `role` claim on an operator's token, and the only way to get a token
+// that RequireAdmin will accept.
+func newTestEngineWithClaims(t *testing.T, claims token.ClaimsProvider) *cryden.Engine {
+	t.Helper()
+	cfg := cryden.Config{
 		JWTSecret:       "test-secret",
 		Users:           memory.NewUserStore(),
 		Sessions:        memory.NewSessionStore(),
@@ -40,7 +50,11 @@ func newTestEngine(t *testing.T) *cryden.Engine {
 		Verifications:   memory.NewVerificationStore(),
 		EmailSender:     stubMailSender{},
 		MagicLinkSender: stubMailSender{},
-	})
+	}
+	if claims != nil {
+		cfg.AccessTokenClaims = claims
+	}
+	engine, err := cryden.New(cfg)
 	if err != nil {
 		t.Fatalf("cryden.New on the in-memory stores: %v", err)
 	}
