@@ -8,6 +8,7 @@ import (
 	"github.com/crydensync/cryden/v2/store"
 
 	"github.com/crydensync/api/config"
+	"github.com/crydensync/api/shiplog"
 	"github.com/crydensync/api/usermeta"
 	"github.com/crydensync/api/webhook"
 )
@@ -51,6 +52,13 @@ type Deps struct {
 	// webhooks, and the handler answers 404 rather than an empty list an
 	// operator would read as "nothing has failed".
 	Hooks webhook.Store
+
+	// Shipped backs the admin shipped-events log — the redacted copy of
+	// the engine's log records that the cloud sink was handed. Nil unless
+	// CLOUD_LOGGING is set, for the same reason Hooks is: with the sink
+	// off, nothing writes rows, and an empty list would be a lie about a
+	// deployment that ships nothing.
+	Shipped shiplog.Store
 }
 
 // NewRouter builds the full route table. Called once from main.go.
@@ -72,6 +80,7 @@ func NewRouter(d Deps) http.Handler {
 	security := &SecurityHandlers{Audit: d.Audit, Users: d.Users, Config: d.Config}
 	metadata := &MetadataHandlers{Users: d.Users, Meta: d.Meta}
 	hooks := &WebhookHandlers{Store: d.Hooks}
+	logging := &LoggingHandlers{Store: d.Shipped}
 
 	mux := http.NewServeMux()
 
@@ -191,6 +200,13 @@ func NewRouter(d Deps) http.Handler {
 	// endpoint here that re-queues or deletes a delivery, deliberately (see
 	// WebhookHandlers).
 	mux.HandleFunc("GET /v1/admin/webhooks/deliveries", RequireAdmin(engine, hooks.Deliveries))
+
+	// The shipped-events log — the redacted, filtered copy of the engine's
+	// own log records that the cloud sink was handed, which is what a
+	// hosted aggregator would have received. Read-only, and the only way
+	// to see it: cryden keeps no history of what it logged, so this table
+	// is the history.
+	mux.HandleFunc("GET /v1/admin/logging/recent", RequireAdmin(engine, logging.Recent))
 
 	return mux
 }

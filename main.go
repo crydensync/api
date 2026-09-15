@@ -10,12 +10,14 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/crydensync/cryden/v2"
+	"github.com/crydensync/cryden/v2/logger"
 	"github.com/crydensync/cryden/v2/security"
 	"github.com/crydensync/cryden/v2/store/postgres"
 
 	"github.com/crydensync/api/config"
 	"github.com/crydensync/api/httpapi"
 	"github.com/crydensync/api/operator"
+	"github.com/crydensync/api/shiplog"
 	"github.com/crydensync/api/templates"
 	"github.com/crydensync/api/usermeta"
 	"github.com/crydensync/api/webhook"
@@ -213,6 +215,46 @@ func main() {
 		engineCfg.WebhookEvents = cfg.WebhookEvents
 	}
 
+	// Cloud logging. Off by default, and off means Config.Logger stays nil
+	// and the engine keeps its own console default — there is nothing to
+	// configure for a deployment that ships no logs anywhere.
+	//
+	// The composition is the one cryden's own logger package doc
+	// prescribes, and the nesting is the whole point: the console logger
+	// gets every record at full detail, while the shipped copy passes
+	// through the level filter and the redactor first, so only it loses
+	// the IP address that makes an incident debuggable. Wrapping the
+	// fan-out in the redactor instead would strip both copies.
+	var shippedLog shiplog.Store
+	if cfg.CloudLogging {
+		shipped := shiplog.NewLogger(shiplog.NewStore(db))
+		shipped.Errors = log.Default()
+		shippedLog = shipped.Store
+
+		var redacted logger.Logger
+		if cfg.CloudLogRedaction == config.CloudLogRedactionHash {
+			// Keyed rather than a bare digest, and keyed with a value of
+			// its own: the whole IPv4 space is 2^32 values, so an unkeyed
+			// hash of an address is a lookup table away from being the
+			// address. cryden's NewHashingRedactor asks for key
+			// separation explicitly, and config.Load is what enforces
+			// that the key is present.
+			var err error
+			if redacted, err = logger.NewHashingRedactor(shipped, cfg.CloudLogHashKey); err != nil {
+				log.Fatalf("invalid cloud log redaction: %v", err)
+			}
+		} else {
+			redacted = logger.NewMaskingRedactor(shipped)
+		}
+
+		engineCfg.Logger = logger.NewMultiLogger(
+			logger.NewConsoleJSONLogger(),
+			logger.NewLevelFilter(redacted, cfg.LogLevel),
+		)
+		log.Printf("cloud logging enabled: records at %s and above are redacted (%s) and recorded in shipped_log_events",
+			cfg.LogLevel, cfg.CloudLogRedaction)
+	}
+
 	engine, err := cryden.New(engineCfg)
 	if err != nil {
 		log.Fatalf("failed to construct cryden engine: %v", err)
@@ -248,6 +290,8 @@ func main() {
 		Users:  users,
 		Meta:   metadata,
 		Hooks:  webhookStore,
+
+		Shipped: shippedLog,
 	})
 	limiter := httpapi.NewEdgeRateLimiter(cfg.EdgeRateLimit, cfg.EdgeRateLimitWindow)
 	handler := httpapi.WithCORS(cfg.CORSOrigins, httpapi.WithEdgeRateLimit(limiter, router))
