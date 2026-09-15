@@ -41,6 +41,7 @@ func NewRouter(d Deps) http.Handler {
 	passkeys := &PasskeyHandlers{Engine: engine}
 	magicLink := &MagicLinkHandlers{Engine: engine}
 	recovery := &RecoveryHandlers{Engine: engine}
+	apiKeys := &APIKeyHandlers{Engine: engine}
 
 	mux := http.NewServeMux()
 
@@ -115,6 +116,19 @@ func NewRouter(d Deps) http.Handler {
 	}))
 
 	mux.HandleFunc("POST /v1/recovery-codes/generate", RequireAuth(engine, recovery.Generate))
+
+	// API keys — machine-to-machine credentials belonging to the calling
+	// user. Every handler here is scoped by cryden itself (auth.GenerateAPIKey/
+	// ListAPIKeys/RevokeAPIKey all take the userID straight from the verified
+	// token and never from the request), so one account can never read or
+	// revoke another's key. Optional per deployment: unset Config.APIKeys
+	// answers 404 api_keys_not_configured, the same shape as every other
+	// unconfigured engine feature.
+	mux.HandleFunc("POST /v1/api-keys", RequireAuth(engine, apiKeys.Create))
+	mux.HandleFunc("GET /v1/api-keys", RequireAuth(engine, apiKeys.List))
+	mux.HandleFunc("DELETE /v1/api-keys/{keyID}", RequireAuth(engine, func(w http.ResponseWriter, r *http.Request) {
+		apiKeys.Revoke(w, r, r.PathValue("keyID"))
+	}))
 
 	// Admin endpoints — the first in this repo, hence the note. Everything
 	// under /v1/admin goes through RequireAdmin (middleware.go), which
