@@ -37,6 +37,15 @@ func main() {
 
 	operators := operator.NewStore(db)
 
+	// Hoisted into locals rather than constructed inline in the config
+	// literal below, because the router needs these same two instances:
+	// GET /v1/admin/security/hash-migration counts what the engine wrote,
+	// and counting a different store object — or a second connection pool
+	// with its own snapshot — is how that report would quietly disagree
+	// with the engine it is reporting on.
+	users := postgres.NewUserStore(db)
+	audit := postgres.NewAuditStore(db)
+
 	// Email templates are optional and entirely this repo's: cryden owns
 	// no message copy. An unset EMAIL_TEMPLATE_DIR leaves both senders
 	// printing their own built-in line, byte for byte as before.
@@ -51,9 +60,9 @@ func main() {
 
 	engineCfg := cryden.Config{
 		JWTSecret:       cfg.JWTSecret,
-		Users:           postgres.NewUserStore(db),
+		Users:           users,
 		Sessions:        postgres.NewSessionStore(db),
-		Audit:           postgres.NewAuditStore(db),
+		Audit:           audit,
 		Verifications:   postgres.NewVerificationStore(db),
 		EmailSender:     &consoleEmailSender{Templates: emailTemplates},                           // dev stand-in — see email_sender.go
 		MagicLinkSender: &consoleMagicLinkSender{BaseURL: cfg.BaseURL, Templates: emailTemplates}, // dev stand-in — see email_sender.go
@@ -172,6 +181,8 @@ func main() {
 		Engine: engine,
 		DB:     db,
 		Config: cfg,
+		Audit:  audit,
+		Users:  users,
 	})
 	limiter := httpapi.NewEdgeRateLimiter(cfg.EdgeRateLimit, cfg.EdgeRateLimitWindow)
 	handler := httpapi.WithCORS(cfg.CORSOrigins, httpapi.WithEdgeRateLimit(limiter, router))
