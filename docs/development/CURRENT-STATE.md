@@ -12,6 +12,9 @@ switch-statement case in `httpapi/oauth_handlers.go` plus its env vars,
 not a router change; Apple is the one that does not fit that shape and
 has its own `httpapi/apple.go` — see `NEXT.md` Tier 1).
 
+Tier 2 added one admin endpoint on top of those, the first in this repo
+— see below.
+
 Tier 1 also added the second-factor surface: TOTP enroll/confirm/
 disable, passkey registration/list/delete, magic-link request/complete,
 recovery-code generation, and the three public completion endpoints a
@@ -24,8 +27,11 @@ unconfigured method answers `404`, never a startup failure.
 
 Two independent rate-limit layers: cryden's own per-user engine-level
 limiter, and this repo's own coarse per-IP edge limiter
-(`httpapi/ratelimit.go`), in-memory and single-process, same caveat as
-cryden's own default limiter.
+(`httpapi/ratelimit.go`). Since Tier 2 the engine-level one can be
+Redis-backed via `REDIS_URL`, which is the shared-window option for a
+deployment with more than one replica; the edge limiter above it is
+still in-memory and single-process either way, the same caveat cryden's
+own default limiter carries.
 
 Response envelope, error codes, and the migration-copying convention
 are all established — see `README.md` and `CODEX.md`.
@@ -165,7 +171,53 @@ authenticator) and Apple (needs real Apple credentials; what is tested
 offline is the signing and the id_token verification, against a local
 JWKS).
 
-## Tier 2 through 5
+## Tier 2 — anomaly detection, named sessions, OAuth health: DONE
+
+Built on `feat/tier2-config-and-oauth-health`. No engine bump this
+tier, so no new migrations: `004`-`008` are still the complete set of
+cryden copies.
+
+- **Anomaly detection and credential-stuffing detection**
+  (`ANOMALY_DETECTION` plus threshold env vars, wired in `main.go`
+  through `postgres.NewAnomalyStore`): off unless switched on, and
+  report-only in every case — a flagged attempt records an audit event,
+  no login is blocked or delayed. Both threshold structs are copied
+  from cryden's own `security.Default*` values and only then
+  overridden, because cryden reads every field of a non-zero
+  thresholds struct: a struct assembled from just the env vars that
+  were set would silently switch off every check left out.
+- **Redis-backed engine rate limiter** (`REDIS_URL`, with
+  `RATE_LIMIT_ATTEMPTS` / `RATE_LIMIT_WINDOW_SECONDS`): the shared
+  window cryden's own config comment points at for more than one
+  replica. Unset, nothing changes — the in-process limiter is still the
+  default. Those two bounds are restated as cryden's own 10/minute
+  rather than left at zero, because with `REDIS_URL` set it is this
+  repo that constructs the limiter and
+  `security.NewRedisRateLimiter` rejects a zero bound.
+- **Named sessions** (`GET /v1/sessions`): `label`, `device` and
+  `location` per entry, computed on read by `cryden.ListNamedSessions`
+  — no new table, no migration, no backfill. A documented breaking
+  change rather than a silent field: `openapi/spec.yaml` is at 1.1 with
+  the new fields and the README says the same in prose. Labels are
+  device-only (`"Chrome on macOS"`) because no geolocator is wired, and
+  `location` is present-but-empty as a result — deliberate, see
+  `PROGRESS.md`.
+- **`GET /v1/admin/oauth/health`** (`httpapi/oauth_health.go`): the
+  first endpoint behind `RequireAdmin`, and so the first real exercise
+  of Tier 0.5's gate. Per provider: configured or not, and
+  `ok` / `degraded` / `unreachable` / `not_configured`. Probes are bare
+  GETs with no OAuth parameters (a 4xx from an authorize endpoint is
+  proof of life, not a failure), concurrent, 5s each, and skipped
+  entirely for a provider this deployment has no credentials for.
+- **`config/config_test.go`**, and the first endpoint-level tests
+  (`httpapi/session_handlers_test.go`, `httpapi/oauth_health_test.go`):
+  cryden's own in-memory stores make a real engine — and now a real
+  router, `RequireAdmin` gate included — constructible with no Postgres,
+  so these pin actual response shapes rather than only error mapping.
+  `internal/smoketest`'s sessions check also stops accepting "200 with
+  anything in it".
+
+## Tier 3 through 5
 
 Not started. See `NEXT.md` for the full, ordered, specced-in-detail
 queue.
