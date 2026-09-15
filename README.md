@@ -84,8 +84,22 @@ Magic-link login needs no extra configuration — it reuses the same `Verificati
 ## Rate limiting
 
 Two independent layers:
-- **Engine-level** (per-user, on login/signup specifically) — already built into CrydenSync itself, protects against credential stuffing.
-- **Edge-level** (per-IP, applied to every request) — coarser, protects the whole API surface from being hammered generally. Configurable via `EDGE_RATE_LIMIT` (default 100 requests/minute per IP). In-memory, per-process — like the engine's own limiter, this does NOT share state across multiple instances behind a load balancer. Fine for a single instance; a Redis-backed version is the natural upgrade path once you scale horizontally.
+- **Engine-level** (per-user, on login/signup/magic-link) — already built into CrydenSync itself. `RATE_LIMIT_ATTEMPTS` / `RATE_LIMIT_WINDOW_SECONDS` tune it (default 10 per minute). In-memory and per-process by default, which is correct for exactly one instance; set `REDIS_URL` and every replica counts against one shared window instead of each keeping its own. Note the trade-off that comes with that: cryden fails those three entry points closed while Redis is unreachable, rather than letting them run unlimited.
+- **Edge-level** (per-IP, applied to every request) — coarser, protects the whole API surface from being hammered generally. Configurable via `EDGE_RATE_LIMIT` (default 100 requests/minute per IP). Still in-memory and per-process, `REDIS_URL` or not — a shared window for the coarse per-IP guard is its own decision, not this one.
+
+## Anomaly detection
+
+Off by default. Set `ANOMALY_DETECTION=true` to turn on cryden's login anomaly detection and credential-stuffing detection — they share one store as their on/off switch, because they are the same login-attempt history read two ways. Both are **report-only**: a flagged attempt records an audit event (`anomaly_detected`, `credential_stuffing_detected`) and nothing else. No login is ever blocked, delayed or challenged by them, and neither returns an error a client could branch on.
+
+Every threshold below defaults to the engine's own value and only needs setting to tune it. Zero means whatever the engine says it means per knob (off for most, "no event suppression" for the stuffing cooldown) — check cryden's own `security` package before setting one to `0`.
+
+```
+ANOMALY_WINDOW_MINUTES=15              ANOMALY_HISTORY_SIZE=20
+ANOMALY_USER_FAILURE_VELOCITY=5        ANOMALY_IP_FAILURE_VELOCITY=20
+ANOMALY_MAX_CONCURRENT_SESSIONS=10     ANOMALY_TOKEN_REUSE_LOOKBACK_MINUTES=1440
+CREDENTIAL_STUFFING_WINDOW_MINUTES=60  CREDENTIAL_STUFFING_TARGET_ACCOUNTS=10
+CREDENTIAL_STUFFING_COOLDOWN_MINUTES=15
+```
 
 ## Response contract
 
