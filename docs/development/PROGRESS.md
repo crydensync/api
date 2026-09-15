@@ -678,3 +678,137 @@ smuggled in behind the other.
 
 Tier 3 is complete. Next is Tier 4, which stays read-only by
 construction with the pre-fill-never-auto-apply decision already made.
+
+## 2026-09-15 — Tier 4, Stage 1 (digest, support diagnosis, config tuning)
+
+Tier 4 is split for the same reason Tier 3 was: the first half is three
+read-only reports with their decisions already made in `NEXT.md`, and
+the second half needs two decisions that are not this session's to
+make (see "Stage 2" below). Branch `feat/tier4-ai-admin-endpoints`.
+
+Three commits, one logical step each: the digest and its history
+(`21ac94c`), the support-ticket login diagnosis (`705b820`), and the
+config tuning advisor (`d74d8a4`).
+
+What each one is, and the one thing about it worth knowing:
+
+- **`GET /v1/admin/digest`** and **`GET /v1/admin/digest/history`**.
+  `digest/` is a new repo-owned package (interface + `PostgresStore` +
+  in-memory double in one file, the convention every store here
+  follows) over `migrations/012_digest_runs`. The on-demand endpoint
+  **records nothing**: an operator hitting it twenty times should not
+  fill a history with twenty near-identical reports, so only the
+  scheduled job writes. The schedule is this repo's own — cryden has no
+  concept of one — and the first run lands one full interval after
+  startup, not at boot, because a process that restarts more often than
+  the interval elapses would otherwise write a row per restart.
+- **`GET /v1/admin/support/diagnose?email=`** → `cryden.DiagnoseLoginIssue`.
+  An unknown account is an **answer** (`Found:false`), not a 404 or a
+  500: "we have never seen this address" is exactly what a support
+  ticket needs to be told, and dressing it up as a server error would
+  hide it.
+- **`GET /v1/admin/config-tuning`** → `admin.BuildTuningReport` called
+  **directly**, not `cryden.ConfigTuningReport`. The structured
+  `TuningSuggestion{Area, Finding, Suggestion}` list is the point: a
+  console renders one card per suggestion, and a pre-rendered text blob
+  cannot be turned back into cards. The counts are returned raw
+  alongside, so the evidence is visible rather than a sentence asking
+  to be trusted.
+
+### The lockout passthrough is a behaviour change, not a tidy-up
+
+Building the tuning advisor surfaced something: **this repo was never
+passing `LockoutThreshold`/`LockoutDuration` to the engine.** `config`
+had no such fields, so `main.go` left them at Go's zero values, so the
+engine ran with a threshold of 0 and a duration of 0 — and cryden does
+no defaulting of either. A zero threshold locks an account on its very
+first failed password; a zero duration locks it until an instant
+already past, which is to say not at all. Every deployment of this API
+so far has been in that second state.
+
+The report is what made it visible: `BuildTuningReport` is asked to
+judge the audit history against "the settings in force", and the
+settings in force were not what anyone thought they were. So `config`
+gained `LockoutThreshold`/`LockoutDuration` (defaulting to cryden's own
+5 and 15 minutes, with the values written down here for the same reason
+the rate-limit bounds are), `main.go` passes them, and a threshold
+below 1 is a **startup error** rather than being read as "off" —
+cryden has no way to switch lockout off, so accepting 0 would be
+accepting a setting that means something else.
+
+This is called out in `README.md`, `.env.example` and the commit
+message because it changes what every existing deployment does the next
+time it restarts. It is the right direction — an account that can be
+guessed at forever was not a design decision anyone made — but it is a
+change nobody asked for, and burying it in a commit about a reporting
+endpoint would have been the wrong way to ship it.
+
+### Verification: what this does NOT cover
+
+- **`migrations/012_digest_runs` has never been applied to a
+  database**, the same as `009`–`011`. Everything above is tested
+  through the in-memory doubles.
+- **`digest.PostgresStore`'s `List` has not been run.** Its limit
+  clamp is asserted through the in-memory double and through
+  `ClampLimit` directly, which is the shared rule — but the SQL that
+  applies it is a copy of a design, not a verified query. The
+  TIMESTAMPTZ round trip in particular cannot be reproduced by a double
+  that stores `time.Time` as `time.Time`.
+- **`memory.AuditStore` stamps `time.Now()` with no injectable clock**,
+  so window-*boundary* exclusion cannot be driven through the endpoint.
+  The digest and tuning tests assert the positive direction (events
+  recorded moments ago do appear inside a one-day window) and the text
+  the engine actually renders, rather than backdating an event.
+- **The digest schedule is a goroutine on `context.Background()`.** The
+  scheduler takes a `context.Context` and is tested with a real
+  cancellable one, but `main.go` has nothing to cancel it with, because
+  this repo still has no graceful shutdown — the debt Stage 1 of Tier 3
+  flagged, now with one more holder.
+- **No live LLM call and no live database provider exist to test**,
+  because Stage 2 is not built. Nothing in Stage 1 touches
+  `ai.LLMProvider` or `ai.QueryableStore`.
+- **`internal/smoketest` still has never been run** against a database,
+  unchanged from every previous tier's note.
+
+### Stage 2, and the two decisions it needs
+
+Stage 2 is the LLM provider config, the database provider config and
+the ask-AI widget config. `NEXT.md` settles the shape of all three
+(settings endpoints, this repo's own config table, pre-fill never
+auto-apply, validate the read-only role by attempting a write). Two
+things it does not settle, both of which change what gets built:
+
+1. **Whether this repo ships a live LLM client at all.** `ai.LLMProvider`
+   is an interface; implementing it against a real vendor means an
+   outbound HTTP client, a vendor choice, and a credential that leaves
+   the building. A console that configures a provider it cannot call is
+   not useful, so this is likely yes — but it is an integration
+   decision, not a wrapper decision, and this repo has so far shipped
+   no outbound integration of its own (the webhooks are cryden calling
+   a URL this repo hands it).
+2. **Where the at-rest encryption key comes from.** `NEXT.md` requires
+   the stored provider credential be encrypted at rest and treated with
+   the same care as `JWT_SECRET`. `ENCRYPTION_KEY` already exists and
+   already encrypts TOTP secrets, so reusing it is the obvious
+   candidate — but reusing one key across two purposes is a decision
+   with a blast radius, and the alternative (a second key, or a KMS)
+   is a deployment change.
+
+Both were left for the user rather than guessed at.
+
+### Noticed while working, not fixed
+
+- **`openapi/spec.yaml` is now at 1.4 and covers Tiers 1–4 Stage 1**,
+  which closes the gap every previous entry flagged — `NEXT.md`'s Tier 1
+  note that the spec "still predates Tier 1" is no longer true. The
+  document is large and hand-maintained, so it can drift again.
+- **The unconfigured-store answer is still `404 not_configured`**, now
+  used by the digest history and the tuning endpoint too. Consistent
+  with every other unconfigured feature here, and still
+  indistinguishable from "this resource genuinely does not exist".
+- **`config.Load` now refuses three knobs at startup** that it used to
+  accept silently (`LOG_LEVEL`, `LOCKOUT_THRESHOLD`, `DIGEST_INTERVAL_HOURS`).
+  That is the intended direction — a setting that silently does nothing
+  is worse than one that refuses to start — but it means an existing
+  deployment with a typo in one of them will fail to boot rather than
+  run with a default.
