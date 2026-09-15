@@ -40,6 +40,10 @@ var tieredEnvVars = []string{
 	"CLOUD_LOG_REDACTION",
 	"CLOUD_LOG_HASH_KEY",
 	"EMAIL_TEMPLATE_DIR",
+	"WEBHOOK_URL",
+	"WEBHOOK_SECRET",
+	"WEBHOOK_EVENTS",
+	"WEBHOOK_MAX_ATTEMPTS",
 }
 
 func loadForTest(t *testing.T, env map[string]string) (Config, error) {
@@ -202,6 +206,18 @@ func TestTier3DefaultsComeFromTheEngine(t *testing.T) {
 	if cfg.EmailTemplateDir != "" {
 		t.Errorf("EmailTemplateDir = %q, want empty (built-in sender text)", cfg.EmailTemplateDir)
 	}
+	// No WEBHOOK_URL means no webhook anything: the off switch is the URL
+	// itself, because a secret and an event list with nowhere to deliver to
+	// describe nothing.
+	if cfg.WebhookURL != "" {
+		t.Errorf("WebhookURL = %q, want empty (webhooks dispatched by nobody)", cfg.WebhookURL)
+	}
+	if len(cfg.WebhookEvents) != 0 {
+		t.Errorf("WebhookEvents = %v, want empty so cryden's own default set applies", cfg.WebhookEvents)
+	}
+	if cfg.WebhookMaxAttempts != 5 {
+		t.Errorf("WebhookMaxAttempts = %d, want 5", cfg.WebhookMaxAttempts)
+	}
 }
 
 // One env var must move exactly one field. This is the same trap the
@@ -282,5 +298,105 @@ func TestTier3CloudLogHashKeyIsRequiredOnlyForHashRedaction(t *testing.T) {
 	}
 	if cfg.CloudLogHashKey != "a-key-of-its-own" {
 		t.Errorf("CloudLogHashKey = %q, want the value that was set", cfg.CloudLogHashKey)
+	}
+}
+
+// The event list is a subscription, so whitespace around an entry is a
+// typo a person makes by hand and does not mean an event type with a
+// space in it — which would match nothing and deliver nothing, silently.
+func TestTier3WebhookEventsAreParsedAndTrimmed(t *testing.T) {
+	cfg, err := loadForTest(t, map[string]string{
+		"WEBHOOK_URL":    "https://hooks.example.com/v1",
+		"WEBHOOK_SECRET": "shared-with-the-receiver",
+		"WEBHOOK_EVENTS": "account_locked, password_reset ,,  email_verified ",
+	})
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	if cfg.WebhookURL != "https://hooks.example.com/v1" {
+		t.Errorf("WebhookURL = %q", cfg.WebhookURL)
+	}
+	got := make([]string, 0, len(cfg.WebhookEvents))
+	for _, e := range cfg.WebhookEvents {
+		got = append(got, string(e))
+	}
+	want := "account_locked,password_reset,email_verified"
+	if strings.Join(got, ",") != want {
+		t.Errorf("WebhookEvents = %v, want %s (trimmed, empties dropped)", got, want)
+	}
+
+	// An empty list is left empty rather than filled in here: cryden is
+	// what turns "no events" into DefaultWebhookEvents, and duplicating
+	// that list in this repo is how the two would come to disagree.
+	cfg, err = loadForTest(t, map[string]string{"WEBHOOK_URL": "https://hooks.example.com/v1"})
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	if len(cfg.WebhookEvents) != 0 {
+		t.Errorf("WebhookEvents = %v with none set, want empty", cfg.WebhookEvents)
+	}
+}
+
+// A secret, an event list or an attempt budget with no URL is a typo, not
+// a deployment: each of them describes how to deliver to somewhere that
+// does not exist. This is the same rule cryden applies to
+// WebhookEvents-without-Webhooks, and it is enforced here because the
+// failure mode is a setting an operator believes is in force.
+func TestTier3WebhookSettingsWithoutAURLAreStartupErrors(t *testing.T) {
+	for name, env := range map[string]map[string]string{
+		"a secret with nowhere to send it": {"WEBHOOK_SECRET": "shared-with-the-receiver"},
+		"a subscription to nothing":        {"WEBHOOK_EVENTS": "account_locked"},
+		"a retry budget for no deliveries": {"WEBHOOK_MAX_ATTEMPTS": "9"},
+		"all three, still no destination":  {"WEBHOOK_SECRET": "s", "WEBHOOK_EVENTS": "account_locked", "WEBHOOK_MAX_ATTEMPTS": "9"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := loadForTest(t, env)
+			if err == nil {
+				t.Fatalf("%v was accepted with no WEBHOOK_URL, want an error", env)
+			}
+			if !strings.Contains(err.Error(), "without WEBHOOK_URL") {
+				t.Errorf("error = %q, want it to name WEBHOOK_URL as the missing half", err)
+			}
+		})
+	}
+
+	// The other direction, which is the one that must keep working: a URL
+	// on its own is a complete configuration.
+	if _, err := loadForTest(t, map[string]string{"WEBHOOK_URL": "https://hooks.example.com/v1"}); err != nil {
+		t.Errorf("a WEBHOOK_URL on its own was rejected: %v", err)
+	}
+}
+
+// Zero attempts would mean a delivery that is queued and never tried, and
+// the row would be a permanent pending — so it is refused rather than
+// read as "the default".
+func TestTier3WebhookMaxAttemptsIsBounded(t *testing.T) {
+	cfg, err := loadForTest(t, map[string]string{
+		"WEBHOOK_URL":          "https://hooks.example.com/v1",
+		"WEBHOOK_MAX_ATTEMPTS": "2",
+	})
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	if cfg.WebhookMaxAttempts != 2 {
+		t.Errorf("WebhookMaxAttempts = %d, want 2", cfg.WebhookMaxAttempts)
+	}
+
+	for value, want := range map[string]string{
+		"0":     "must be at least 1",
+		"-1":    "must be at least 1",
+		"twice": "must be a number",
+	} {
+		_, err := loadForTest(t, map[string]string{
+			"WEBHOOK_URL":          "https://hooks.example.com/v1",
+			"WEBHOOK_MAX_ATTEMPTS": value,
+		})
+		if err == nil {
+			t.Fatalf("WEBHOOK_MAX_ATTEMPTS=%s was accepted, want an error", value)
+		}
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("WEBHOOK_MAX_ATTEMPTS=%s: error = %q, want it to contain %q", value, err, want)
+		}
 	}
 }

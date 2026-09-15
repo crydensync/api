@@ -10,6 +10,7 @@ import (
 
 	"github.com/crydensync/cryden/v2/logger"
 	"github.com/crydensync/cryden/v2/security"
+	"github.com/crydensync/cryden/v2/store"
 )
 
 type Config struct {
@@ -192,6 +193,46 @@ type Config struct {
 	// template is a startup failure, the same class of typo as an
 	// unparseable REDIS_URL.
 	EmailTemplateDir string
+
+	// WebhookURL is where engine events are delivered. Empty means this
+	// deployment dispatches none: Config.Webhooks stays nil, nothing is
+	// written to the delivery log, and the admin endpoint that reads it
+	// answers 404 rather than an empty list.
+	//
+	// Set, and main.go wires the enqueue-and-worker pair the engine's own
+	// doc comment asks for — cryden calls a sender synchronously on the
+	// request path, so nothing here may make an HTTP call on that path.
+	WebhookURL string
+
+	// WebhookSecret is the HMAC-SHA256 key every delivery is signed with,
+	// in the X-Cryden-Signature header. It is the receiver's only basis for
+	// believing a request came from here, so it should be a value of its
+	// own rather than a reuse of JWT_SECRET or ENCRYPTION_KEY — the same
+	// key separation cryden asks for on CLOUD_LOG_HASH_KEY, and for the
+	// same reason: this one is shared with a third party by design.
+	//
+	// Empty is allowed and means the deliveries go out unsigned, which is a
+	// legitimate configuration for an endpoint on a trusted network. The
+	// worker says so once at startup rather than leaving it to be
+	// discovered.
+	WebhookSecret string
+
+	// WebhookEvents selects which engine events are delivered. Empty leaves
+	// it to cryden, whose DefaultWebhookEvents is the actionable,
+	// low-volume subset — deliberately excluding login_success,
+	// login_failed and token_rotated, which are the three a host is most
+	// likely to ask for and most likely to regret.
+	//
+	// Setting this without WebhookURL is a startup failure, matching
+	// cryden's own rule for the same pair of fields: a subscription to
+	// nothing is a typo, not a configuration.
+	WebhookEvents []store.AuditEventType
+
+	// WebhookMaxAttempts is how many times a delivery may be attempted
+	// before it is recorded as failed. Bounded on purpose — a delivery log
+	// that retries forever is a load generator pointed at a third party —
+	// and the row stays readable afterwards either way.
+	WebhookMaxAttempts int
 }
 
 // PasswordHasher values. Bcrypt is the engine's own default and what an
@@ -431,6 +472,58 @@ func Load() (Config, error) {
 	// Email templates. Optional: unset keeps the console senders' own
 	// text. main.go is what reports a directory that is set but broken.
 	cfg.EmailTemplateDir = os.Getenv("EMAIL_TEMPLATE_DIR")
+
+	// Webhooks. WEBHOOK_URL is the on/off switch; everything else only
+	// means anything with it set, which is why the block below refuses the
+	// combination rather than letting three settings silently do nothing.
+	cfg.WebhookURL = os.Getenv("WEBHOOK_URL")
+	cfg.WebhookSecret = os.Getenv("WEBHOOK_SECRET")
+	if cfg.WebhookMaxAttempts, err = envInt("WEBHOOK_MAX_ATTEMPTS", 5); err != nil {
+		return cfg, err
+	}
+	if cfg.WebhookMaxAttempts < 1 {
+		// Zero would mean "never attempt a delivery", which is not a
+		// configuration anyone means to write, and a negative one would
+		// make the budget check meaningless.
+		return cfg, fmt.Errorf("WEBHOOK_MAX_ATTEMPTS must be at least 1, got %d", cfg.WebhookMaxAttempts)
+	}
+	if events := os.Getenv("WEBHOOK_EVENTS"); events != "" {
+		for _, e := range strings.Split(events, ",") {
+			if e = strings.TrimSpace(e); e != "" {
+				cfg.WebhookEvents = append(cfg.WebhookEvents, store.AuditEventType(e))
+			}
+		}
+	}
+
+	if cfg.WebhookURL == "" {
+		// Named individually rather than checked as a group, because the
+		// fix is different for each and an operator reading "webhook
+		// configuration is incomplete" would have to go and look.
+		//
+		// This mirrors cryden's own rule for Config.WebhookEvents without
+		// Config.Webhooks: a subscription to nothing is a typo. It also
+		// covers the two knobs cryden cannot name, having no idea what
+		// environment variables exist.
+		var orphaned []string
+		if cfg.WebhookSecret != "" {
+			orphaned = append(orphaned, "WEBHOOK_SECRET")
+		}
+		if len(cfg.WebhookEvents) > 0 {
+			orphaned = append(orphaned, "WEBHOOK_EVENTS")
+		}
+		if os.Getenv("WEBHOOK_MAX_ATTEMPTS") != "" {
+			// Non-empty rather than LookupEnv, because empty counts as
+			// unset throughout this package (envInt above reads it that
+			// way too). A variable an operator emptied is not a live
+			// setting, and reporting it as one would make an env file
+			// full of blank placeholders refuse to start.
+			orphaned = append(orphaned, "WEBHOOK_MAX_ATTEMPTS")
+		}
+		if len(orphaned) > 0 {
+			return cfg, fmt.Errorf("%s set without WEBHOOK_URL — there is nowhere to deliver to",
+				strings.Join(orphaned, ", "))
+		}
+	}
 
 	return cfg, nil
 }
