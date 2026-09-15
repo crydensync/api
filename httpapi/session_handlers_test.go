@@ -50,6 +50,12 @@ func newTestEngineWithClaims(t *testing.T, claims token.ClaimsProvider) *cryden.
 		Verifications:   memory.NewVerificationStore(),
 		EmailSender:     stubMailSender{},
 		MagicLinkSender: stubMailSender{},
+		// API keys are always wired in production (see main.go), so the
+		// test engine wires them too — otherwise the endpoints built on
+		// them would answer 404 api_keys_not_configured here and every
+		// test of one would be a test of that instead.
+		APIKeys:      memory.NewAPIKeyStore(),
+		APIKeyPrefix: "ck",
 	}
 	if claims != nil {
 		cfg.AccessTokenClaims = claims

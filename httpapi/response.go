@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/crydensync/cryden/v2/auth"
 )
@@ -50,4 +51,27 @@ func writeBadRequest(w http.ResponseWriter, message string) {
 
 func decodeJSON(r *http.Request, v any) error {
 	return json.NewDecoder(r.Body).Decode(v)
+}
+
+// timeLayout is how every timestamp leaves this API — RFC 3339 with an
+// offset, which is what time.Time.Format("2006-01-02T15:04:05Z07:00")
+// produces and what openapi/spec.yaml documents. Named once so a new
+// field cannot quietly pick a second spelling.
+const timeLayout = "2006-01-02T15:04:05Z07:00"
+
+func formatTime(t time.Time) string {
+	return t.Format(timeLayout)
+}
+
+// formatTimePtr is formatTime for the engine's optional timestamps —
+// ExpiresAt and LastUsedAt on an API key, which are nil rather than zero
+// until something sets them. A nil stays a JSON null so "never expires"
+// and "never used" are distinguishable from a real instant, which a
+// zero-valued time rendered as a string would not be.
+func formatTimePtr(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	formatted := t.Format(timeLayout)
+	return &formatted
 }
