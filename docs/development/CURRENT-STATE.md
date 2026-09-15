@@ -15,9 +15,12 @@ has its own `httpapi/apple.go` — see `NEXT.md` Tier 1).
 Tier 2 added one admin endpoint on top of those, the first in this repo
 — see below. Tier 3 added three more admin endpoints and this repo's
 first three tables of its own, plus the config that lights up Argon2id,
-cloud logging and email templates — see below. Every admin endpoint in
-this repo is either read-only or an explicit operator action on a named
-key; nothing on that surface applies a suggestion by itself.
+cloud logging and email templates — see below. Tier 4's Stage 1 added
+three more admin endpoints and this repo's fourth table — the weekly
+digest and its recorded history, the support-ticket login diagnosis and
+the config tuning advisor. Every admin endpoint in this repo is either
+read-only or an explicit operator action on a named key; nothing on that
+surface applies a suggestion by itself.
 
 Tier 1 also added the second-factor surface: TOTP enroll/confirm/
 disable, passkey registration/list/delete, magic-link request/complete,
@@ -305,10 +308,84 @@ in-memory double, not against Postgres `FOR UPDATE SKIP LOCKED`, and
 that double cannot reproduce two workers racing. `PROGRESS.md` says all
 of this plainly.
 
-## Tier 4 and 5
+## Tier 4 — AI-assisted admin endpoints (Stage 1): DONE
+
+Built in two stages on `feat/tier4-ai-admin-endpoints`, for the same
+reason Tier 3 was: the three read-only reports below had their decisions
+already made in `NEXT.md`, while Stage 2 needs two decisions that are
+not a build session's to make (see the end of this section). `go build`,
+`go vet`, `gofmt -l` and `go test ./...` are clean, `httpapi` is also
+green under `-race`, and `PROGRESS.md` records what that does and does
+not cover.
+
+Everything here is `RequireAdmin`, read-only, and buildable on the
+engine alone — no LLM, no second database connection, no outbound call:
+
+- **`GET /v1/admin/digest`** and **`GET /v1/admin/digest/history`**.
+  The engine's `cryden.DigestSince` renders a report over a window on
+  demand; the history is this repo's own (`digest/`,
+  `migrations/012_digest_runs`), written only by the scheduled job. The
+  on-demand endpoint **records nothing**, so an operator hitting it
+  twenty times does not fill the history with twenty near-identical
+  reports. The engine has no scheduling concept at all, so the job, the
+  table and the history endpoint are all entirely this repo's. The first
+  run lands one full interval after startup rather than at boot, since a
+  process that restarts more often than the interval elapses would
+  otherwise write a row per restart. Unset `DIGEST_INTERVAL_HOURS` (or
+  `0`) means no schedule, no goroutine and a `404 not_configured`
+  history, while the on-demand endpoint keeps working.
+- **`GET /v1/admin/support/diagnose?email=...`** →
+  `cryden.DiagnoseLoginIssue`. An unknown address is an **answer**
+  (`found: false`), not a `404`: "we have never seen this address" is
+  what a support ticket needs to be told. It describes a locked account;
+  it cannot unlock one.
+- **`GET /v1/admin/config-tuning`** → `admin.BuildTuningReport` called
+  **directly**, not `cryden.ConfigTuningReport`. The structured
+  `TuningSuggestion{Area, Finding, Suggestion}` list is the point — a
+  console renders one card per suggestion, and a pre-rendered text blob
+  cannot be turned back into cards. The raw audit `counts` are returned
+  alongside, so the evidence is visible rather than a sentence asking to
+  be trusted. `window_days` defaults to cryden's own 30 days (wider than
+  the digest's week on purpose — a config knob should be judged against
+  a month of traffic) and is bounded rather than clamped. The route
+  accepts **GET and nothing else**, which is the HTTP-level half of the
+  pre-fill-never-auto-apply decision: there is no POST that takes a
+  suggestion, and applying one means pre-filling a settings field a
+  human saves through the ordinary settings path.
+
+**One behaviour change came out of this tier, and it was not the point
+of it.** The tuning report is asked to judge the audit history against
+"the settings in force", and building it surfaced that this repo had
+never passed `LockoutThreshold`/`LockoutDuration` to the engine — so
+every deployment so far ran with both at Go's zero value, and cryden
+defaults neither. A zero threshold locks an account on its first failed
+password; a zero duration locks it until an instant already past, which
+is to say not at all. `config` now owns both knobs (cryden's own 5 and
+15 minutes by default), `main.go` passes them, and a threshold below 1
+is a startup error rather than being read as "off", because cryden has
+no way to switch lockout off. It is a real change to what every existing
+deployment does on its next restart, so it is called out in `README.md`,
+`.env.example` and its commit message rather than buried.
+
+The digest's new table (`012`) has **never been applied to a real
+database**, the same as `009`–`011` — there is no Postgres in this
+sandbox — and the digest schedule is a goroutine on
+`context.Background()`, because this repo still has no graceful
+shutdown. `PROGRESS.md` says both plainly.
+
+## Tier 4 Stage 2, and Tier 5
 
 Not started. See `NEXT.md` for the full, ordered, specced-in-detail
-queue. Tier 4 is all behind `RequireAdmin` and stays read-only by
-construction, with the decision already made that an AI suggestion
-**pre-fills** a settings form and never auto-applies.
+queue. Stage 2 is the LLM provider config, the read-only database
+provider config and the ask-AI widget config;
+`ai.LLMProvider`/`ai.QueryableStore` have no implementation in this repo
+yet, so nothing in it has an endpoint. Two decisions are open and were
+left for the user rather than guessed at: whether this repo ships a live
+LLM client against a real vendor (an outbound integration, which this
+repo has so far shipped none of), and where the at-rest encryption key
+for the stored provider credential comes from (reusing the existing
+`ENCRYPTION_KEY` is the obvious candidate and still a decision with a
+blast radius). Tier 4 stays read-only by construction, with the
+decision already made that an AI suggestion **pre-fills** a settings
+form and never auto-applies.
 

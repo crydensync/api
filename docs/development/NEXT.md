@@ -16,6 +16,10 @@ Tier 2 is done — see the status note under Tier 2 and `PROGRESS.md`'s
 migrations to copy.
 Tier 3 is done, in two stages on `feat/tier3-config-and-endpoints` — see
 the status note under Tier 3 and `PROGRESS.md`'s 2026-09-15 entries.
+Tier 4 is **in progress** on `feat/tier4-ai-admin-endpoints`: Stage 1
+(digest + scheduling + history, support diagnosis, config tuning
+advisor) is built — see the status note under Tier 4. Stage 2 (the LLM
+and database providers, and the ask-AI widget config) is not started.
 
 ---
 
@@ -283,6 +287,41 @@ Two details were decided rather than assumed, and are recorded in
 ---
 
 ## Tier 4 — AI-assisted admin endpoints (all behind `RequireAdmin`)
+
+> **Status: Stage 1 is built on `feat/tier4-ai-admin-endpoints`.**
+> The weekly digest and its schedule and history, the support-ticket
+> assistant and the config tuning advisor all exist, are wired in
+> `main.go`, and are tested end to end on the in-memory stores —
+> `go build`/`go vet`/`go test ./...` clean, `httpapi` also green under
+> `-race`. Stage 2 — the LLM provider config, the read-only database
+> provider config and the ask-AI widget config — is **not started**:
+> `ai.LLMProvider` and `ai.QueryableStore` still have no implementation
+> in this repo, so nothing in Stage 2 has an endpoint yet.
+>
+> What is still owed from Stage 1, said plainly: **migration
+> `012_digest_runs` has never been applied to a database** (no Postgres
+> in this sandbox — the same is true of `009`–`011`), so the digest
+> history's real `PostgresStore` has only been reasoned about, not run;
+> and the digest schedule is a goroutine on `context.Background()`,
+> because this repo still has no graceful shutdown.
+>
+> Two things Stage 1 changed that were not in the spec below, both
+> recorded because they are behaviour rather than plumbing:
+>
+> - **`LOCKOUT_THRESHOLD`/`LOCKOUT_DURATION_MINUTES` are now passed to
+>   the engine.** cryden does not default these — it reads whatever it
+>   is handed, and `0`/`0` means an account is locked on its first
+>   failed password until an instant already past, which is to say
+>   never. Until this tier the engine ran with both at zero. So this is
+>   a real behaviour change, not a tidy-up, and it is why the tuning
+>   report can quote the lockout settings in force rather than cryden's
+>   documented defaults.
+> - **`GET /v1/admin/digest` records nothing.** The spec puts scheduling
+>   and history in this repo, and that is still exactly where the
+>   writing happens — but the on-demand endpoint deliberately does not
+>   write a row, so an operator hitting it twenty times does not fill
+>   the history with twenty near-identical reports. Only the scheduled
+>   job writes.
 
 Every endpoint in this tier stays read-only/surface-only, no
 exceptions — see `CLAUDE.md`'s hard rule at the top.
