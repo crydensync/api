@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/crydensync/cryden/v2/logger"
 	"github.com/crydensync/cryden/v2/security"
 )
 
@@ -113,7 +114,98 @@ type Config struct {
 	// to need company.
 	RateLimitAttempts int
 	RateLimitWindow   time.Duration
+
+	// PasswordHasher selects which algorithm NEW password hashes are
+	// written with — PasswordHasherBcrypt (the engine's default) or
+	// PasswordHasherArgon2id. Switching is safe at any time and needs no
+	// migration: cryden wraps whichever hasher it holds in a MultiHasher
+	// that picks the verifier from each stored hash's own format, so
+	// existing bcrypt hashes keep verifying and are rewritten one
+	// successful login at a time. That gradual rewrite is what
+	// GET /v1/admin/security/hash-migration reports on.
+	//
+	// An unrecognized value is a startup failure rather than a silent
+	// fall back to bcrypt: someone who typed "argon" meant to turn
+	// Argon2id on, and quietly leaving them on the weaker algorithm is
+	// the one failure mode this setting must not have.
+	PasswordHasher string
+
+	// Argon2idParams is the cost configuration for that hasher. Like the
+	// anomaly thresholds above, it starts as cryden's own
+	// security.DefaultArgon2idParams and each ARGON2ID_* env var replaces
+	// only the field it names — cryden reads a partially-filled params
+	// struct as a real custom configuration used as-is, so a struct
+	// assembled from only the env vars that happened to be set would
+	// silently zero the rest and fail validation on a deployment that
+	// meant to change one knob.
+	//
+	// Populated whether or not PasswordHasher selects argon2id, so
+	// GET /v1/admin/security/hash-migration can report what the
+	// deployment would write without reconstructing it separately.
+	Argon2idParams security.Argon2idParams
+
+	// APIKeyPrefix is the non-secret label every generated API key
+	// starts with, as in "ck_9f3a1c02...". The point of the convention is
+	// that a key leaked into a commit is greppable, so set it to
+	// something recognisable as yours. cryden rejects whitespace and
+	// underscores (the underscore separates the label from the secret),
+	// and ignores it entirely unless the API key store is wired — which
+	// main.go always does.
+	APIKeyPrefix string
+
+	// LogLevel is the threshold the cloud sink drops records below,
+	// leaving the local copy untouched. Parsed by logger.ParseLevel,
+	// whose error is the point: a typo defaulted to debug quietly
+	// multiplies a vendor's bill.
+	LogLevel logger.Level
+
+	// CloudLogging turns the cloud sink on. Off by default, and off means
+	// Config.Logger stays nil and the engine keeps its own console
+	// default — there is nothing to configure for a deployment that ships
+	// no logs anywhere.
+	CloudLogging bool
+
+	// CloudLogRedaction picks how personal data is stripped from the copy
+	// leaving the building: CloudLogRedactionMask replaces it with a
+	// fixed marker, CloudLogRedactionHash replaces it with a keyed digest
+	// so the same address still reads as the same address across records
+	// — "one IP, forty accounts" is exactly the shape credential
+	// stuffing has, which a mask destroys. Hash mode needs
+	// CloudLogHashKey.
+	CloudLogRedaction string
+
+	// CloudLogHashKey is the HMAC key for hash-mode redaction. It must be
+	// the same on every replica or one address hashes two ways and the
+	// correlation the mode exists for is gone — and it should be a value
+	// of its own rather than a reuse of JWT_SECRET or ENCRYPTION_KEY.
+	// cryden's NewHashingRedactor asks for that separation explicitly:
+	// this key is handed to the component whose entire job is to hand its
+	// output to a third party.
+	CloudLogHashKey string
+
+	// EmailTemplateDir is a directory holding message templates this repo
+	// renders instead of its console senders' built-in lines. cryden
+	// deliberately owns no template configuration at all — a message body
+	// is a host app's copy, not the engine's — so this is entirely this
+	// repo's. Empty keeps the console senders' hard-coded text
+	// byte-for-byte; a dir that is set but unreadable or missing a
+	// template is a startup failure, the same class of typo as an
+	// unparseable REDIS_URL.
+	EmailTemplateDir string
 }
+
+// PasswordHasher values. Bcrypt is the engine's own default and what an
+// unset PASSWORD_HASHER leaves in place.
+const (
+	PasswordHasherBcrypt   = "bcrypt"
+	PasswordHasherArgon2id = "argon2id"
+)
+
+// CloudLogRedaction values, matching cryden's two Redactor constructors.
+const (
+	CloudLogRedactionMask = "mask"
+	CloudLogRedactionHash = "hash"
+)
 
 // Load reads .env (if present, filling only gaps — real env vars
 // always win) then reads the actual environment. No external
@@ -265,7 +357,129 @@ func Load() (Config, error) {
 		return cfg, err
 	}
 
+	// Password hashing. Bcrypt is the engine's default, so the only thing
+	// this repo has to do for it is not pass a hasher — but the argon2id
+	// parameters are assembled either way, because the hash-migration
+	// report describes what the deployment is configured to write and
+	// should not have to rebuild that answer from a second place.
+	cfg.PasswordHasher = os.Getenv("PASSWORD_HASHER")
+	switch cfg.PasswordHasher {
+	case "":
+		cfg.PasswordHasher = PasswordHasherBcrypt
+	case PasswordHasherBcrypt, PasswordHasherArgon2id:
+	default:
+		return cfg, fmt.Errorf("PASSWORD_HASHER must be %q or %q, got %q",
+			PasswordHasherBcrypt, PasswordHasherArgon2id, cfg.PasswordHasher)
+	}
+
+	// Defaults first, then one override per env var — see the field
+	// comment for why a partially-filled struct would be a real problem
+	// here rather than a harmless one.
+	cfg.Argon2idParams = security.DefaultArgon2idParams
+	if cfg.Argon2idParams.Memory, err = envUint32("ARGON2ID_MEMORY_KIB", cfg.Argon2idParams.Memory); err != nil {
+		return cfg, err
+	}
+	if cfg.Argon2idParams.Iterations, err = envUint32("ARGON2ID_ITERATIONS", cfg.Argon2idParams.Iterations); err != nil {
+		return cfg, err
+	}
+	if cfg.Argon2idParams.Parallelism, err = envUint8("ARGON2ID_PARALLELISM", cfg.Argon2idParams.Parallelism); err != nil {
+		return cfg, err
+	}
+	if cfg.Argon2idParams.SaltLength, err = envUint32("ARGON2ID_SALT_LENGTH", cfg.Argon2idParams.SaltLength); err != nil {
+		return cfg, err
+	}
+	if cfg.Argon2idParams.KeyLength, err = envUint32("ARGON2ID_KEY_LENGTH", cfg.Argon2idParams.KeyLength); err != nil {
+		return cfg, err
+	}
+
+	// The engine applies "ck" as its own default, so writing it here too
+	// is not redundant: the hash-migration report and the console both
+	// want to show the prefix actually in force, and reading it back off
+	// a config struct is the only way to get that without duplicating
+	// cryden's default in a second place.
+	cfg.APIKeyPrefix = os.Getenv("API_KEY_PREFIX")
+	if cfg.APIKeyPrefix == "" {
+		cfg.APIKeyPrefix = "ck"
+	}
+
+	// Cloud logging. LOG_LEVEL is parsed rather than defaulted on error:
+	// see ParseLevel's own doc comment — a typo silently filed at debug
+	// multiplies a vendor bill, and one silently filed at error throws
+	// away the records someone was trying to keep.
+	if cfg.LogLevel, err = logger.ParseLevel(envString("LOG_LEVEL", "info")); err != nil {
+		return cfg, err
+	}
+	if cfg.CloudLogging, err = envBool("CLOUD_LOGGING", false); err != nil {
+		return cfg, err
+	}
+	cfg.CloudLogRedaction = envString("CLOUD_LOG_REDACTION", CloudLogRedactionMask)
+	switch cfg.CloudLogRedaction {
+	case CloudLogRedactionMask, CloudLogRedactionHash:
+	default:
+		return cfg, fmt.Errorf("CLOUD_LOG_REDACTION must be %q or %q, got %q",
+			CloudLogRedactionMask, CloudLogRedactionHash, cfg.CloudLogRedaction)
+	}
+	cfg.CloudLogHashKey = os.Getenv("CLOUD_LOG_HASH_KEY")
+	// Required only when it would actually be used. Asking every
+	// deployment for a second secret it has no purpose for is how a
+	// required-when-unused setting ends up copy-pasted from JWT_SECRET,
+	// which is the specific thing the key separation exists to prevent.
+	if cfg.CloudLogRedaction == CloudLogRedactionHash && cfg.CloudLogHashKey == "" {
+		return cfg, fmt.Errorf("CLOUD_LOG_HASH_KEY is required when CLOUD_LOG_REDACTION is %q", CloudLogRedactionHash)
+	}
+
+	// Email templates. Optional: unset keeps the console senders' own
+	// text. main.go is what reports a directory that is set but broken.
+	cfg.EmailTemplateDir = os.Getenv("EMAIL_TEMPLATE_DIR")
+
 	return cfg, nil
+}
+
+// envString reads an optional string env var, falling back to def when it
+// is unset or empty. An empty value counts as unset rather than as a
+// setting of its own: every string knob here has a working default, so
+// "set it to nothing" is never how a deployment means to say something.
+func envString(name, def string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return def
+}
+
+// envUint32 and envUint8 read an optional unsigned env var, falling back
+// to def when it is unset or empty. They exist rather than an int-and-cast
+// because Argon2id's cost parameters are unsigned all the way down: a
+// negative value cast to uint8 does not fail, it wraps to 255 lanes, and
+// the hasher would then take a deployment's typo as a configuration. So a
+// minus sign is a startup failure here, which is the only place it can
+// still be caught saying what it meant.
+//
+// The width is ParseUint's bitSize, which rejects an out-of-range value
+// with its own "value out of range" — so the error names the variable and
+// then says precisely what was wrong with it, without a second copy of
+// each bound to keep in step.
+func envUint32(name string, def uint32) (uint32, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.ParseUint(v, 10, 32)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a non-negative whole number: %w", name, err)
+	}
+	return uint32(n), nil
+}
+
+func envUint8(name string, def uint8) (uint8, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.ParseUint(v, 10, 8)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a non-negative whole number: %w", name, err)
+	}
+	return uint8(n), nil
 }
 
 // envInt reads an optional integer env var, falling back to def when it

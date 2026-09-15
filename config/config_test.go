@@ -5,15 +5,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crydensync/cryden/v2/logger"
 	"github.com/crydensync/cryden/v2/security"
 )
 
-// tier2EnvVars are the vars these tests assert on, cleared before every
+// tieredEnvVars are the vars these tests assert on, cleared before every
 // case so a value left in the developer's shell cannot make a
 // default-value assertion pass or fail for the wrong reason. Setting one
 // to "" is the same as leaving it unset: every loader in this package
 // treats empty as absent.
-var tier2EnvVars = []string{
+var tieredEnvVars = []string{
 	"ANOMALY_DETECTION",
 	"ANOMALY_WINDOW_MINUTES",
 	"ANOMALY_HISTORY_SIZE",
@@ -27,6 +28,18 @@ var tier2EnvVars = []string{
 	"REDIS_URL",
 	"RATE_LIMIT_ATTEMPTS",
 	"RATE_LIMIT_WINDOW_SECONDS",
+	"PASSWORD_HASHER",
+	"ARGON2ID_MEMORY_KIB",
+	"ARGON2ID_ITERATIONS",
+	"ARGON2ID_PARALLELISM",
+	"ARGON2ID_SALT_LENGTH",
+	"ARGON2ID_KEY_LENGTH",
+	"API_KEY_PREFIX",
+	"LOG_LEVEL",
+	"CLOUD_LOGGING",
+	"CLOUD_LOG_REDACTION",
+	"CLOUD_LOG_HASH_KEY",
+	"EMAIL_TEMPLATE_DIR",
 }
 
 func loadForTest(t *testing.T, env map[string]string) (Config, error) {
@@ -34,7 +47,7 @@ func loadForTest(t *testing.T, env map[string]string) (Config, error) {
 	t.Setenv("DATABASE_URL", "postgres://user:pw@localhost/db")
 	t.Setenv("JWT_SECRET", "test-secret")
 	t.Setenv("CORS_ORIGINS", "http://localhost:5173")
-	for _, name := range tier2EnvVars {
+	for _, name := range tieredEnvVars {
 		t.Setenv(name, "")
 	}
 	for name, value := range env {
@@ -137,6 +150,12 @@ func TestTier2MalformedValuesAreStartupErrors(t *testing.T) {
 		{"non-numeric minutes", map[string]string{"ANOMALY_WINDOW_MINUTES": "soon"}, "ANOMALY_WINDOW_MINUTES must be a number of minutes"},
 		{"non-numeric seconds", map[string]string{"RATE_LIMIT_WINDOW_SECONDS": "1.5"}, "RATE_LIMIT_WINDOW_SECONDS must be a number of seconds"},
 		{"non-numeric count", map[string]string{"CREDENTIAL_STUFFING_TARGET_ACCOUNTS": "many"}, "CREDENTIAL_STUFFING_TARGET_ACCOUNTS must be a number"},
+		{"unknown hasher", map[string]string{"PASSWORD_HASHER": "argon"}, "PASSWORD_HASHER must be"},
+		{"negative argon2id cost", map[string]string{"ARGON2ID_PARALLELISM": "-1"}, "ARGON2ID_PARALLELISM must be a non-negative whole number"},
+		{"oversized argon2id lane count", map[string]string{"ARGON2ID_PARALLELISM": "256"}, "ARGON2ID_PARALLELISM must be a non-negative whole number"},
+		{"unknown log level", map[string]string{"LOG_LEVEL": "verbose"}, "unrecognized level name"},
+		{"unknown redaction mode", map[string]string{"CLOUD_LOG_REDACTION": "encrypt"}, "CLOUD_LOG_REDACTION must be"},
+		{"hash redaction without a key", map[string]string{"CLOUD_LOG_REDACTION": "hash"}, "CLOUD_LOG_HASH_KEY is required"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -148,5 +167,120 @@ func TestTier2MalformedValuesAreStartupErrors(t *testing.T) {
 				t.Errorf("error = %q, want it to contain %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// The Tier 3 defaults, all of which have to be the engine's own answers
+// rather than this repo's guesses: bcrypt is what cryden runs with no
+// hasher set, and the argon2id parameters are RFC 9106's option two.
+func TestTier3DefaultsComeFromTheEngine(t *testing.T) {
+	cfg, err := loadForTest(t, nil)
+	if err != nil {
+		t.Fatalf("Load() failed with only the required vars set: %v", err)
+	}
+
+	if cfg.PasswordHasher != PasswordHasherBcrypt {
+		t.Errorf("PasswordHasher = %q, want %q", cfg.PasswordHasher, PasswordHasherBcrypt)
+	}
+	// Assembled even when bcrypt is in force, so the hash-migration
+	// report can say what this deployment WOULD write.
+	if cfg.Argon2idParams != security.DefaultArgon2idParams {
+		t.Errorf("Argon2idParams = %+v, want the engine's defaults %+v", cfg.Argon2idParams, security.DefaultArgon2idParams)
+	}
+	if cfg.APIKeyPrefix != "ck" {
+		t.Errorf("APIKeyPrefix = %q, want the engine's own default \"ck\"", cfg.APIKeyPrefix)
+	}
+	if cfg.CloudLogging {
+		t.Error("cloud logging is on without CLOUD_LOGGING being set")
+	}
+	if cfg.LogLevel != logger.LevelInfo {
+		t.Errorf("LogLevel = %s, want info", cfg.LogLevel)
+	}
+	if cfg.CloudLogRedaction != CloudLogRedactionMask {
+		t.Errorf("CloudLogRedaction = %q, want %q", cfg.CloudLogRedaction, CloudLogRedactionMask)
+	}
+	if cfg.EmailTemplateDir != "" {
+		t.Errorf("EmailTemplateDir = %q, want empty (built-in sender text)", cfg.EmailTemplateDir)
+	}
+}
+
+// One env var must move exactly one field. This is the same trap the
+// anomaly thresholds have: cryden treats a partially-filled params
+// struct as a complete custom configuration, so an assembly that
+// started from zero would set four knobs to zero and fail validation.
+func TestTier3Argon2idOverrideLeavesEveryOtherKnobDefaulted(t *testing.T) {
+	cfg, err := loadForTest(t, map[string]string{
+		"PASSWORD_HASHER":     PasswordHasherArgon2id,
+		"ARGON2ID_ITERATIONS": "5",
+	})
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	if cfg.PasswordHasher != PasswordHasherArgon2id {
+		t.Errorf("PasswordHasher = %q, want %q", cfg.PasswordHasher, PasswordHasherArgon2id)
+	}
+	if cfg.Argon2idParams.Iterations != 5 {
+		t.Errorf("Iterations = %d, want 5", cfg.Argon2idParams.Iterations)
+	}
+	if cfg.Argon2idParams.Memory != security.DefaultArgon2idParams.Memory {
+		t.Errorf("Memory = %d, want the engine default %d", cfg.Argon2idParams.Memory, security.DefaultArgon2idParams.Memory)
+	}
+	if cfg.Argon2idParams.Parallelism != security.DefaultArgon2idParams.Parallelism {
+		t.Errorf("Parallelism = %d, want the engine default %d", cfg.Argon2idParams.Parallelism, security.DefaultArgon2idParams.Parallelism)
+	}
+	if cfg.Argon2idParams.SaltLength != security.DefaultArgon2idParams.SaltLength {
+		t.Errorf("SaltLength = %d, want the engine default %d", cfg.Argon2idParams.SaltLength, security.DefaultArgon2idParams.SaltLength)
+	}
+	if cfg.Argon2idParams.KeyLength != security.DefaultArgon2idParams.KeyLength {
+		t.Errorf("KeyLength = %d, want the engine default %d", cfg.Argon2idParams.KeyLength, security.DefaultArgon2idParams.KeyLength)
+	}
+	// And the assembled set is one cryden will actually accept — the
+	// assertion the field-by-field checks above cannot make between them.
+	if _, err := security.NewArgon2idHasher(cfg.Argon2idParams); err != nil {
+		t.Errorf("the assembled params were rejected by the engine: %v", err)
+	}
+}
+
+// A wrong LOG_LEVEL must not fall back to anything. ParseLevel's own
+// doc comment is explicit that both fallbacks are wrong in one
+// direction: debug multiplies a vendor bill, error discards records
+// someone was trying to keep.
+func TestTier3LogLevelIsParsedNotDefaulted(t *testing.T) {
+	cfg, err := loadForTest(t, map[string]string{"LOG_LEVEL": "WARN"})
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+	if cfg.LogLevel != logger.LevelWarn {
+		t.Errorf("LogLevel = %s, want warn (case-insensitive)", cfg.LogLevel)
+	}
+
+	if _, err := loadForTest(t, map[string]string{"LOG_LEVEL": "verbose"}); err == nil {
+		t.Error("an unknown LOG_LEVEL was accepted, want a startup failure")
+	}
+}
+
+// The hash key is required only when something would use it — asking
+// every deployment for a secret it has no purpose for is how a second
+// required key ends up copy-pasted from JWT_SECRET, which is the exact
+// reuse cryden's NewHashingRedactor warns against.
+func TestTier3CloudLogHashKeyIsRequiredOnlyForHashRedaction(t *testing.T) {
+	cfg, err := loadForTest(t, map[string]string{"CLOUD_LOG_REDACTION": CloudLogRedactionMask})
+	if err != nil {
+		t.Fatalf("mask redaction without a hash key failed: %v", err)
+	}
+	if cfg.CloudLogHashKey != "" {
+		t.Errorf("CloudLogHashKey = %q, want empty", cfg.CloudLogHashKey)
+	}
+
+	cfg, err = loadForTest(t, map[string]string{
+		"CLOUD_LOG_REDACTION": CloudLogRedactionHash,
+		"CLOUD_LOG_HASH_KEY":  "a-key-of-its-own",
+	})
+	if err != nil {
+		t.Fatalf("hash redaction with a key failed: %v", err)
+	}
+	if cfg.CloudLogHashKey != "a-key-of-its-own" {
+		t.Errorf("CloudLogHashKey = %q, want the value that was set", cfg.CloudLogHashKey)
 	}
 }
