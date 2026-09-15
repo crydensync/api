@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"database/sql"
 	"log"
 	"net/http"
@@ -12,12 +11,12 @@ import (
 	"github.com/crydensync/cryden/v2"
 	"github.com/crydensync/cryden/v2/security"
 	"github.com/crydensync/cryden/v2/store/postgres"
-	"github.com/crydensync/cryden/v2/token"
 
 	"github.com/crydensync/api/config"
 	"github.com/crydensync/api/httpapi"
 	"github.com/crydensync/api/operator"
 	"github.com/crydensync/api/templates"
+	"github.com/crydensync/api/usermeta"
 )
 
 func main() {
@@ -45,6 +44,11 @@ func main() {
 	// with the engine it is reporting on.
 	users := postgres.NewUserStore(db)
 	audit := postgres.NewAuditStore(db)
+
+	// Per-user metadata: this repo's own table, merged into the access
+	// token's claims below. See usermeta's package doc for why the
+	// reserved-key rule lives in the store rather than in the handler.
+	metadata := usermeta.NewStore(db)
 
 	// Email templates are optional and entirely this repo's: cryden owns
 	// no message copy. An unset EMAIL_TEMPLATE_DIR leaves both senders
@@ -76,20 +80,19 @@ func main() {
 		APIKeys:      postgres.NewAPIKeyStore(db),
 		APIKeyPrefix: cfg.APIKeyPrefix,
 
-		// Attaches a "role" claim for console operators only — an
-		// ordinary end user's token gets no extra claims at all, not
-		// even role="user". See operator/store.go for why this is a
-		// separate table rather than anything on cryden's own User.
-		AccessTokenClaims: token.ClaimsFunc(func(ctx context.Context, userID string) (map[string]any, error) {
-			role, isOperator, err := operators.RoleFor(ctx, userID)
-			if err != nil {
-				return nil, err
-			}
-			if !isOperator {
-				return nil, nil
-			}
-			return map[string]any{"role": role}, nil
-		}),
+		// The claims every access token carries for its user: "role" for
+		// console operators, plus every metadata key the admin console has
+		// mapped. usermeta.ClaimsProvider owns the merge — including the
+		// rule that "role" is refused as a metadata key, which is exactly
+		// why it lives in a package a test can reach rather than in a
+		// closure here.
+		//
+		// This runs on EVERY login and every refresh — roughly once per
+		// ACCESS_TOKEN_TTL per active session — and costs two queries.
+		// That is the price of claims that are current rather than
+		// frozen at signup, and it is why the engine calls a claims
+		// provider on the hot path only when a host asks it to.
+		AccessTokenClaims: usermeta.ClaimsProvider(metadata, operators),
 	}
 
 	// Password hashing. Leaving Hasher unset is what selects bcrypt — the
@@ -183,6 +186,7 @@ func main() {
 		Config: cfg,
 		Audit:  audit,
 		Users:  users,
+		Meta:   metadata,
 	})
 	limiter := httpapi.NewEdgeRateLimiter(cfg.EdgeRateLimit, cfg.EdgeRateLimitWindow)
 	handler := httpapi.WithCORS(cfg.CORSOrigins, httpapi.WithEdgeRateLimit(limiter, router))

@@ -9,6 +9,8 @@ import (
 	"github.com/crydensync/cryden/v2/auth"
 	"github.com/crydensync/cryden/v2/store"
 	"github.com/crydensync/cryden/v2/token"
+
+	"github.com/crydensync/api/usermeta"
 )
 
 // apiError is the (status, code, message) triple every handler
@@ -139,6 +141,16 @@ func mapError(err error) apiError {
 		return apiError{http.StatusBadRequest, "invalid_api_key_scope", "a scope must be non-empty and contain no whitespace"}
 	case errors.Is(err, auth.ErrInvalidAPIKeyTTL):
 		return apiError{http.StatusBadRequest, "invalid_api_key_ttl", "expiry cannot be in the past"}
+	// Per-user metadata. The two 400s are the reserved-claim rule reaching
+	// the client: a key of "sub" would not be ignored at login, it would
+	// fail the login, so it is refused where an operator can still see
+	// why. "role" is refused with it — see usermeta.RoleClaim.
+	case errors.Is(err, usermeta.ErrReservedKey):
+		return apiError{http.StatusBadRequest, "reserved_metadata_key", "that key names a claim this deployment sets itself, so it cannot be mapped as metadata"}
+	case errors.Is(err, usermeta.ErrInvalidKey):
+		return apiError{http.StatusBadRequest, "invalid_metadata_key", "a metadata key must start with a letter or underscore and contain only letters, digits, underscores, dots and dashes, up to 64 characters"}
+	case errors.Is(err, usermeta.ErrNotFound):
+		return apiError{http.StatusNotFound, "metadata_key_not_found", "no such metadata key on this user"}
 	// The five "not configured" sentinels below mean this deployment has
 	// not enabled that feature, not that the caller did anything wrong.
 	// 404 rather than 500 so a client can hide the option instead of
