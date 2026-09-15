@@ -158,6 +158,8 @@ POST   /v1/login/passkey/finish      (completes a paused login)
 POST   /v1/login/recovery-code       (completes a paused login)
 ```
 
+`GET /v1/sessions` answers with *named* sessions: each entry keeps its `id`, `ip`, `user_agent` and `created_at`, and gains `label`, `device` and `location`, all computed on read from the session's own IP and User-Agent — nothing new is stored and no migration exists for it. `label` is the string a "your devices" screen shows (`Chrome on macOS`, or `Unknown device` for a client that sent no User-Agent). `location` is present but empty unless a geolocator is configured, and this repo wires none on purpose: every implementation of that interface calls somebody else's internet service, which is a deployment's decision rather than this repo's. The response shape is documented in `openapi/spec.yaml`.
+
 `{provider}` is `google`, `github`, `microsoft`, `discord`, `gitlab` or `apple`.
 The two OAuth flows are separate
 on purpose:
