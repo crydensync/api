@@ -1,12 +1,12 @@
 # api — next up
 
 Ordered queue. Take the first unfinished item, build it completely,
-verify it (see `CODEX.md`), update the three docs
+verify it (see `CLAUDE.md`), update the three docs
 (`CURRENT-STATE.md`/`NEXT.md`/`PROGRESS.md`), then stop for review
 before starting the next tier. Specs below are deliberately detailed
 so you don't need to ask anything mid-build — where something is
 genuinely unspecified, make the most reasonable call consistent with
-`CODEX.md`'s ownership rules and note the assumption in `PROGRESS.md`.
+`CLAUDE.md`'s ownership rules and note the assumption in `PROGRESS.md`.
 
 Tier 0 and Tier 0.5 are done — see `CURRENT-STATE.md`.
 Tier 1 is done — see the status note under Tier 1 and `PROGRESS.md`'s
@@ -29,7 +29,7 @@ the status note under Tier 3 and `PROGRESS.md`'s 2026-09-15 entries.
 > What is still owed: a first DB-backed smoke-test run (no Postgres in
 > this sandbox), a live Apple round trip (no Apple credentials here), and
 > the WebAuthn ceremonies, which need a real browser authenticator.
-> `PROGRESS.md` says all of that plainly, per `CODEX.md`'s verification
+> `PROGRESS.md` says all of that plainly, per `CLAUDE.md`'s verification
 > rule, rather than counting green unit tests as end-to-end coverage.
 
 Each of these mirrors an existing engine feature that already has a
@@ -285,7 +285,7 @@ Two details were decided rather than assumed, and are recorded in
 ## Tier 4 — AI-assisted admin endpoints (all behind `RequireAdmin`)
 
 Every endpoint in this tier stays read-only/surface-only, no
-exceptions — see `CODEX.md`'s hard rule at the top.
+exceptions — see `CLAUDE.md`'s hard rule at the top.
 
 - **Weekly digest**: `GET /v1/admin/digest` → `cryden.WeeklyDigest`/
   `DigestSince`. Plus **scheduling and history** (new, this repo's own
