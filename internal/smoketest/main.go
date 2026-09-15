@@ -101,13 +101,32 @@ func main() {
 	})
 
 	check("list sessions", func() error {
-		var resp map[string]any
+		// Typed rather than a bare map: the named-session fields are the
+		// part of this endpoint Tier 2 changed, so "the request came back
+		// 200" is no longer the whole assertion.
+		var resp struct {
+			Data []struct {
+				ID    string `json:"id"`
+				Label string `json:"label"`
+			} `json:"data"`
+		}
 		status, err := doJSON("GET", "/v1/sessions", nil, accessToken, &resp)
 		if err != nil {
 			return err
 		}
 		if status != 200 {
 			return fmt.Errorf("expected 200, got %d", status)
+		}
+		if len(resp.Data) == 0 {
+			return fmt.Errorf("expected the session this token belongs to, got none")
+		}
+		if resp.Data[0].ID == "" {
+			return fmt.Errorf("session has no id")
+		}
+		// Never empty by construction — the engine falls back to
+		// "Unknown device" when the User-Agent says nothing.
+		if resp.Data[0].Label == "" {
+			return fmt.Errorf("session has no label")
 		}
 		return nil
 	})

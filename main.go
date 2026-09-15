@@ -7,8 +7,10 @@ import (
 	"net/http"
 
 	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/crydensync/cryden/v2"
+	"github.com/crydensync/cryden/v2/security"
 	"github.com/crydensync/cryden/v2/store/postgres"
 	"github.com/crydensync/cryden/v2/token"
 
@@ -87,6 +89,42 @@ func main() {
 			// shows up as a ceremony failure in the browser.
 			log.Printf("WARNING: WebAuthn disabled — passkeys need WEBAUTHN_RP_ID, WEBAUTHN_RP_DISPLAY_NAME and WEBAUTHN_RP_ORIGINS all set")
 		}
+	}
+
+	// Login anomaly detection and credential-stuffing detection share one
+	// store as their on/off switch — they are the same login-attempt
+	// history read two ways — and are off unless explicitly enabled. Both
+	// are report-only in the engine: a flagged attempt records an audit
+	// event and nothing else, no login is ever blocked or delayed by
+	// them.
+	if cfg.AnomalyDetection {
+		engineCfg.Anomalies = postgres.NewAnomalyStore(db)
+		engineCfg.AnomalyThresholds = cfg.AnomalyThresholds
+		engineCfg.CredentialStuffingThresholds = cfg.CredentialStuffingThresholds
+	}
+
+	// The engine's own rate limiter — login, signup, magic-link — is
+	// in-process by default. REDIS_URL swaps in the shared one so several
+	// replicas count against a single window instead of each keeping its
+	// own. Nothing dials Redis here: like every store, the limiter is
+	// injected already constructed and the client is owned by this
+	// process, exactly like the database handle above. An unreachable
+	// Redis therefore shows up as a denied (failing-closed) rate-limit
+	// check on the calls that use it rather than as a startup failure —
+	// cryden's own documented trade-off for the shared limiter.
+	engineCfg.RateLimitAttempts = cfg.RateLimitAttempts
+	engineCfg.RateLimitWindow = cfg.RateLimitWindow
+	if cfg.RedisURL != "" {
+		redisOpts, err := redis.ParseURL(cfg.RedisURL)
+		if err != nil {
+			log.Fatalf("invalid REDIS_URL: %v", err)
+		}
+		limiter, err := security.NewRedisRateLimiter(redis.NewClient(redisOpts), cfg.RateLimitAttempts, cfg.RateLimitWindow)
+		if err != nil {
+			log.Fatalf("failed to build the Redis rate limiter: %v", err)
+		}
+		engineCfg.RateLimiter = limiter
+		log.Printf("engine rate limiting is Redis-backed")
 	}
 
 	engine, err := cryden.New(engineCfg)

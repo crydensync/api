@@ -11,6 +11,9 @@ genuinely unspecified, make the most reasonable call consistent with
 Tier 0 and Tier 0.5 are done — see `CURRENT-STATE.md`.
 Tier 1 is done — see the status note under Tier 1 and `PROGRESS.md`'s
 2026-09-14 entries for how far it is verified.
+Tier 2 is done — see the status note under Tier 2 and `PROGRESS.md`'s
+2026-09-15 entry. No engine bump this tier, so there were no new cryden
+migrations to copy.
 
 ---
 
@@ -141,12 +144,35 @@ Two details were decided rather than assumed, and are recorded in
 
 ## Tier 2 — mostly config, one endpoint
 
+> **Status: all three sub-items built on
+> `feat/tier2-config-and-oauth-health`.** `go build`/`go vet`/`go test`
+> are clean and `gofmt -l` is empty, and this tier's tests are the first
+> in this repo that exercise endpoints rather than only error mapping:
+> cryden ships its own in-memory stores, so a real engine — and now a
+> real router — can be built with no Postgres at all. Everything still
+> owed is unchanged from Tier 1 and repo-wide: the first DB-backed
+> smoke-test run, the WebAuthn ceremonies (need a real authenticator)
+> and a live Apple round trip (needs Apple credentials).
+
 - **Anomaly detection, credential-stuffing detection, Redis rate
   limiter**: `Config.Anomalies`, `Config.AnomalyThresholds`,
   `Config.CredentialStuffingThresholds`, `Config.RateLimiter` — wire
   from env vars in `config/config.go`, following the existing pattern
   for optional engine config. No new routes; these are transparent to
   every existing auth endpoint.
+
+  **Done.** `ANOMALY_DETECTION` switches both detections on (one switch,
+  because they share one store as their on/off switch), the threshold
+  knobs and `REDIS_URL` / `RATE_LIMIT_ATTEMPTS` /
+  `RATE_LIMIT_WINDOW_SECONDS` sit alongside them, and `main.go` wires the
+  store, the thresholds and the limiter. Two decisions worth reading the
+  code comments for: the thresholds start as the engine's own
+  `security.Default*` values and only then take overrides (cryden reads
+  every field of a non-zero thresholds struct, so a partial struct is not
+  partly-defaulted — it is partly-disabled), and the two rate-limit
+  bounds are restated as 10/minute rather than left at zero because with
+  `REDIS_URL` set it is this repo that constructs the limiter, and
+  `security.NewRedisRateLimiter` rejects a zero bound.
 - **Named sessions**: change `GET /v1/sessions`'s response shape to
   use `cryden.ListNamedSessions` instead of the current session list,
   so each entry includes its `Label` (e.g. `"Chrome on macOS, San
@@ -154,12 +180,36 @@ Two details were decided rather than assumed, and are recorded in
   existing consumers — bump the response, don't silently add a field
   if the existing shape is documented in `openapi/spec.yaml` as fixed;
   check there first.
+
+  **Done**, as a documented change rather than a silent addition: the
+  four existing fields keep their names and types, `label`, `device` and
+  `location` are new, `openapi/spec.yaml` goes to 1.1 with the schema and
+  path description saying so, and the README says the same in prose. The
+  spec was *not* marked fixed or additive-only, so "bump" here meant
+  documenting the break in both places, which is what the version bump
+  signals.
+
+  The label is device-only — `"Chrome on macOS"` — because no geolocator
+  is wired. That is a decision, not an omission: it is
+  `Config.Geolocator`, and cryden deliberately ships no implementation
+  because every implementation calls somebody else's internet service.
+  `location` is present-but-empty as a result, and `label` is never empty
+  either way. See `PROGRESS.md` for the full reasoning.
 - **OAuth provider health check** (new, for the console): `GET
   /v1/admin/oauth/health` (behind `RequireAdmin`) — for each configured
   provider, a lightweight reachability check against its authorize
   endpoint (HEAD or a cheap GET, not a real OAuth flow), returning
   per-provider status. This is entirely this repo's own logic; cryden
   has no concept of provider health.
+
+  **Done**, and it is the first endpoint in this repo behind
+  `RequireAdmin` — so it is also the first real exercise of Tier 0.5's
+  gate, which its tests now cover through the actual router. A cheap GET,
+  no OAuth parameters, concurrent with a 5s timeout each. Four verdicts
+  rather than a bool: `ok` (answered below 500 — a bare GET legitimately
+  gets a 4xx from an authorize endpoint, which still proves it is up),
+  `degraded` (5xx), `unreachable` (no response, with the transport
+  error), `not_configured` (no credentials, nothing probed).
 
 ---
 

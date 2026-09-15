@@ -1,13 +1,19 @@
 openapi: 3.0.3
 info:
   title: CrydenSync API
-  version: "1.0"
+  version: "1.1"
   description: >
     A self-hosted HTTP wrapper around the CrydenSync auth engine.
     Every response follows one of two envelope shapes: {"data": ...}
     on success, or {"error": {"code": ..., "message": ...}} on
     failure. `code` is the stable string to branch on programmatically
     — never parse `message`.
+
+    1.1 is the named-sessions change: GET /sessions gained `label`,
+     `device` and `location` on each entry (Tier 2). The four fields it
+     already returned keep their names and types, so a client reading
+     only those is unaffected; a client that validates the object
+     against an exhaustive schema is not.
 servers:
   - url: http://localhost:8080/v1
     description: Local dev
@@ -28,11 +34,64 @@ components:
 
     Session:
       type: object
+      description: >
+        An active session. `label`, `device` and `location` are derived
+        on read from the session's own ip and user_agent — nothing is
+        stored for them and no migration exists. `label` is never empty:
+        a client that renders only one string per row should render that
+        one.
       properties:
         id: { type: string, format: uuid }
         ip: { type: string }
         user_agent: { type: string }
         created_at: { type: string, format: date-time }
+        label:
+          type: string
+          description: >
+            Human-readable description of the session, e.g.
+            "Chrome on macOS" or "Chrome on macOS — San Francisco, CA"
+            once a geolocator is configured. "Unknown device" when the
+            User-Agent was unparseable or absent.
+        device:
+          type: object
+          description: The User-Agent parsed into its parts, each "" when unrecognised.
+          properties:
+            browser: { type: string, description: 'e.g. "Chrome", "Safari", "curl"' }
+            os: { type: string, description: 'e.g. "macOS", "Windows", "iOS"' }
+            form: { type: string, description: 'desktop, mobile, tablet or bot; "" when it cannot be told' }
+        location:
+          type: object
+          description: >
+            Always present, all fields empty unless a geolocator is
+            configured. No geolocator is wired by default — this repo
+            ships none, since every implementation calls somebody else's
+            internet service.
+          properties:
+            city: { type: string }
+            region: { type: string }
+            country: { type: string }
+
+    OAuthProviderHealth:
+      type: object
+      description: One provider's row in GET /admin/oauth/health.
+      properties:
+        provider: { type: string, description: 'google, github, microsoft, discord, gitlab or apple' }
+        configured:
+          type: boolean
+          description: >
+            Whether this deployment has credentials for the provider. False
+            means it cannot log anyone in and no probe was made.
+        status:
+          type: string
+          enum: [ok, degraded, unreachable, not_configured]
+          description: >
+            ok — the authorize endpoint answered below 500 (a bare GET
+            legitimately gets a 4xx); degraded — it answered 5xx;
+            unreachable — no HTTP response at all; not_configured — no
+            credentials, so nothing was probed.
+        http_status: { type: integer, description: Omitted when no response was received. }
+        latency_ms: { type: integer, description: Omitted when no probe ran. }
+        error: { type: string, description: Transport error; present only for unreachable. }
 
     ErrorResponse:
       type: object
@@ -209,6 +268,12 @@ paths:
   /sessions:
     get:
       summary: List active sessions for the authenticated user
+      description: >
+        Returns named sessions (since 1.1): id, ip, user_agent and
+        created_at as before, plus label, device and location. `label`
+        is what a "your devices" screen should show; the structured
+        halves are there so a client can group or sort without
+        re-parsing a display string.
       security: [{ bearerAuth: [] }]
       responses:
         '200':
@@ -331,3 +396,32 @@ paths:
       responses:
         '200': { description: Healthy }
         '503': { description: Database unreachable }
+
+  /admin/oauth/health:
+    get:
+      summary: Reachability of each OAuth provider this API knows about
+      description: >
+        Admin only — an operator's token. Per provider: whether it is
+        configured at all, and whether its authorize endpoint answers.
+        A probe is a bare GET with no OAuth parameters, so it can neither
+        start nor complete a login; providers left unconfigured are
+        reported without being probed. This is api-side logic, not an
+        engine feature: cryden knows whether a provider is configured,
+        not whether it is reachable.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: One row per provider, in a stable order
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      providers:
+                        type: array
+                        items: { $ref: '#/components/schemas/OAuthProviderHealth' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }

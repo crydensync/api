@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/crydensync/cryden/v2/security"
 )
 
 type Config struct {
@@ -69,6 +71,48 @@ type Config struct {
 	WebAuthnRPID          string
 	WebAuthnRPDisplayName string
 	WebAuthnRPOrigins     []string
+
+	// AnomalyDetection switches cryden's login anomaly detection and
+	// credential-stuffing detection on. They share one store as their
+	// on/off switch (see main.go) because they are the same
+	// login-attempt history read two ways, and the engine has no partial
+	// mode: with no store set neither runs and nothing about login
+	// changes. Off unless explicitly enabled, and report-only either way
+	// — a flagged attempt records an audit event, it never blocks.
+	AnomalyDetection bool
+
+	// AnomalyThresholds and CredentialStuffingThresholds start from the
+	// engine's own security.Default* values and are then overridden one
+	// env var at a time. That order matters: cryden reads every field of
+	// a non-zero thresholds struct, so a struct built from only the env
+	// vars that happened to be set would silently zero every knob left
+	// out rather than falling back to its default.
+	AnomalyThresholds            security.AnomalyThresholds
+	CredentialStuffingThresholds security.CredentialStuffingThresholds
+
+	// RedisURL points the engine's own rate limiter — the fine-grained,
+	// per-user one covering login, signup and magic-link requests — at a
+	// Redis so every replica counts against one window. Empty keeps
+	// cryden's in-process limiter, which is correct for exactly one
+	// process: three replicas behind a load balancer each keep their own
+	// counters, making the effective limit three times what was
+	// configured.
+	//
+	// This does not touch the coarse per-IP edge limiter in
+	// httpapi/ratelimit.go, which stays in-process either way.
+	RedisURL string
+
+	// RateLimitAttempts and RateLimitWindow are the engine limiter's
+	// bounds in either mode. Their defaults are cryden's own (10 per
+	// minute) restated here rather than left at zero, because the engine
+	// only fills a zero value in for the in-process limiter it builds
+	// itself: with RedisURL set it is this repo that calls
+	// security.NewRedisRateLimiter, and that constructor rejects a zero
+	// bound outright. Leaving them at zero would make REDIS_URL on its
+	// own a startup failure, which is not a setting anyone would expect
+	// to need company.
+	RateLimitAttempts int
+	RateLimitWindow   time.Duration
 }
 
 // Load reads .env (if present, filling only gaps — real env vars
@@ -166,7 +210,119 @@ func Load() (Config, error) {
 		}
 	}
 
+	// Anomaly detection and credential-stuffing detection — one switch,
+	// because they are one store. Both threshold sets begin as the
+	// engine's defaults and every knob below only replaces the one it
+	// names (see the field comments for why that ordering is not
+	// cosmetic).
+	var err error
+	if cfg.AnomalyDetection, err = envBool("ANOMALY_DETECTION", false); err != nil {
+		return cfg, err
+	}
+	cfg.AnomalyThresholds = security.DefaultAnomalyThresholds
+	cfg.CredentialStuffingThresholds = security.DefaultCredentialStuffingThresholds
+
+	if cfg.AnomalyThresholds.Window, err = envMinutes("ANOMALY_WINDOW_MINUTES", cfg.AnomalyThresholds.Window); err != nil {
+		return cfg, err
+	}
+	if cfg.AnomalyThresholds.HistorySize, err = envInt("ANOMALY_HISTORY_SIZE", cfg.AnomalyThresholds.HistorySize); err != nil {
+		return cfg, err
+	}
+	if cfg.AnomalyThresholds.UserFailureVelocity, err = envInt("ANOMALY_USER_FAILURE_VELOCITY", cfg.AnomalyThresholds.UserFailureVelocity); err != nil {
+		return cfg, err
+	}
+	if cfg.AnomalyThresholds.IPFailureVelocity, err = envInt("ANOMALY_IP_FAILURE_VELOCITY", cfg.AnomalyThresholds.IPFailureVelocity); err != nil {
+		return cfg, err
+	}
+	// Zero disables the concurrent-session check specifically, the same
+	// off switch every other AnomalyThresholds knob has.
+	if cfg.AnomalyThresholds.MaxConcurrentSessions, err = envInt("ANOMALY_MAX_CONCURRENT_SESSIONS", cfg.AnomalyThresholds.MaxConcurrentSessions); err != nil {
+		return cfg, err
+	}
+	if cfg.AnomalyThresholds.TokenReuseLookback, err = envMinutes("ANOMALY_TOKEN_REUSE_LOOKBACK_MINUTES", cfg.AnomalyThresholds.TokenReuseLookback); err != nil {
+		return cfg, err
+	}
+	if cfg.CredentialStuffingThresholds.Window, err = envMinutes("CREDENTIAL_STUFFING_WINDOW_MINUTES", cfg.CredentialStuffingThresholds.Window); err != nil {
+		return cfg, err
+	}
+	if cfg.CredentialStuffingThresholds.TargetAccounts, err = envInt("CREDENTIAL_STUFFING_TARGET_ACCOUNTS", cfg.CredentialStuffingThresholds.TargetAccounts); err != nil {
+		return cfg, err
+	}
+	if cfg.CredentialStuffingThresholds.Cooldown, err = envMinutes("CREDENTIAL_STUFFING_COOLDOWN_MINUTES", cfg.CredentialStuffingThresholds.Cooldown); err != nil {
+		return cfg, err
+	}
+
+	// Engine rate limiter. REDIS_URL is the only thing that decides where
+	// the counters live (see the field comments for why the bounds
+	// default to cryden's own numbers instead of zero); a URL main.go
+	// cannot parse is a startup failure rather than a setting that was
+	// quietly ignored.
+	cfg.RedisURL = os.Getenv("REDIS_URL")
+	if cfg.RateLimitAttempts, err = envInt("RATE_LIMIT_ATTEMPTS", 10); err != nil {
+		return cfg, err
+	}
+	if cfg.RateLimitWindow, err = envSeconds("RATE_LIMIT_WINDOW_SECONDS", time.Minute); err != nil {
+		return cfg, err
+	}
+
 	return cfg, nil
+}
+
+// envInt reads an optional integer env var, falling back to def when it
+// is unset or empty.
+func envInt(name string, def int) (int, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a number: %w", name, err)
+	}
+	return n, nil
+}
+
+// envBool reads an optional boolean env var, falling back to def when it
+// is unset or empty. Accepted spellings are strconv.ParseBool's —
+// 1/0, t/f, true/false, T/F, TRUE/FALSE, True/False — so there is
+// exactly one set of rules to remember rather than a second dialect
+// defined here.
+func envBool(name string, def bool) (bool, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("%s must be true or false: %w", name, err)
+	}
+	return b, nil
+}
+
+func envMinutes(name string, def time.Duration) (time.Duration, error) {
+	return envDurationIn(name, time.Minute, "minutes", def)
+}
+
+func envSeconds(name string, def time.Duration) (time.Duration, error) {
+	return envDurationIn(name, time.Second, "seconds", def)
+}
+
+// envDurationIn reads an optional duration env var written as a whole
+// number of unit (time.Minute or time.Second — the two granularities any
+// knob here needs), falling back to def when it is unset or empty. A
+// value of zero is passed through deliberately: it is a real "switch
+// this check off" setting for several thresholds, and policing ranges
+// here would mean a second copy of each knob's own valid range.
+func envDurationIn(name string, unit time.Duration, unitName string, def time.Duration) (time.Duration, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s must be a number of %s: %w", name, unitName, err)
+	}
+	return time.Duration(n) * unit, nil
 }
 
 func loadEnvFile(path string) {
