@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: CrydenSync API
-  version: "1.3"
+  version: "1.4"
   description: >
     A self-hosted HTTP wrapper around the CrydenSync auth engine.
     Every response follows one of two envelope shapes: {"data": ...}
@@ -27,6 +27,13 @@ info:
     that PUT and DELETE /admin/users/{userID}/metadata/{key} are this
     API's first endpoints that change what a subsequent token for
     another user will contain. See that path's description.
+
+    1.4 is additive: the weekly security digest and the history of the
+    ones the schedule built (GET /admin/digest, GET
+    /admin/digest/history). Both admin only. Neither changes any
+    existing path, field or status code, and neither can take an
+    action — the digest endpoint records nothing at all, and only a
+    background job this API runs writes the history.
 servers:
   - url: http://localhost:8080/v1
     description: Local dev
@@ -329,6 +336,36 @@ components:
             is when the engine logged it. Nano-precision, because one
             login emits many records and at second precision they would
             tie and nothing downstream could order them.
+
+    DigestRun:
+      type: object
+      description: >
+        One recorded digest. Text is the report exactly as the engine
+        rendered it at the time, stored rather than the counts behind it:
+        a digest covers a window that has ENDED, so re-running its query
+        later would not reproduce it — "the last seven days" is anchored
+        to when the digest was built. Storing what was reported is what
+        makes reading a past digest the same experience as reading a
+        fresh one.
+      properties:
+        id: { type: integer }
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
+        generated_at:
+          type: string
+          format: date-time
+          description: >
+            When the row was written. Distinct from window_end on purpose:
+            a run replayed after an outage covers a window that closed
+            before the digest was made.
+        text:
+          type: string
+          description: >
+            The rendered report, verbatim. Included in a listing rather
+            than behind a fetch-by-id, because there is no fetch-by-id —
+            reading a past digest is the whole point of the history, and
+            a list of windows with no reports in it would be an index to
+            nothing.
 
   responses:
     BadRequest:
@@ -1105,6 +1142,114 @@ paths:
           description: >
             not_configured — the router was built without a shipped-events
             sink, which is what an unset CLOUD_LOGGING produces.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/digest:
+    get:
+      summary: Build a security digest for a window ending now
+      description: >
+        Admin only. Returns cryden's DigestSince report for the window
+        ending at this request, verbatim — the text is the engine's and
+        this API does not reformat a report it does not own. since and
+        until are reported alongside it because a client should not have
+        to parse English out of a digest to learn what it covers, and
+        because until is this API's clock reading rather than something
+        the engine returns.
+
+        Read-only in the strongest sense available: the report is built
+        through an interface with no way to write anything, and this
+        handler records nothing either. Asking twice leaves no trace, so
+        a digest in the history below is only ever something the
+        schedule produced.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: window_days
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 365, default: 7 }
+          description: >
+            How far back to count. Default 7, which is what makes this a
+            weekly digest. Bounded and rejected rather than clamped, so a
+            caller that asked for 5000 days is told so instead of being
+            handed 365 and reading it as a week that happens to hold the
+            same history.
+      responses:
+        '200':
+          description: The report and the window it covers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      since: { type: string, format: date-time }
+                      until:
+                        type: string
+                        format: date-time
+                        description: The instant the report was built. Always now — a digest is a report on the run-up to the present.
+                      window_days: { type: integer }
+                      text:
+                        type: string
+                        description: >
+                          The engine's rendered report, byte for byte.
+                          Multi-line plain text, meant to be read as it is.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/digest/history:
+    get:
+      summary: The digests the schedule has recorded, newest first
+      description: >
+        Admin only. Lists rows from this API's own digest_runs table,
+        which only the scheduler writes — nothing on the HTTP surface can
+        create, re-run or delete one, so an operator cannot manufacture
+        history through the API.
+
+        cryden has no scheduling concept: WeeklyDigest/DigestSince build a
+        report on demand and return a string, with no run record. The
+        table, the job that fills it and this endpoint are all this API's
+        own. DIGEST_INTERVAL_HOURS turns the schedule on; it is opt-in,
+        and the first run happens one full interval after startup rather
+        than at boot, so a process that restarts often does not write one
+        row per restart.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 20 }
+      responses:
+        '200':
+          description: The recorded runs, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      runs:
+                        type: array
+                        items: { $ref: '#/components/schemas/DigestRun' }
+                      count: { type: integer }
+                      limit:
+                        type: integer
+                        description: The limit in force, so a console showing "20 of 143" need not keep its own copy of the default.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: >
+            not_configured — no digest_runs store is wired, which is what
+            an unset DIGEST_INTERVAL_HOURS produces. Answered rather than
+            returned as an empty list, which an operator would read as
+            "no digest has ever been built".
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }

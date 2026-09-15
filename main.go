@@ -5,16 +5,19 @@ import (
 	"database/sql"
 	"log"
 	"net/http"
+	"time"
 
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/crydensync/cryden/v2"
+	"github.com/crydensync/cryden/v2/admin"
 	"github.com/crydensync/cryden/v2/logger"
 	"github.com/crydensync/cryden/v2/security"
 	"github.com/crydensync/cryden/v2/store/postgres"
 
 	"github.com/crydensync/api/config"
+	"github.com/crydensync/api/digest"
 	"github.com/crydensync/api/httpapi"
 	"github.com/crydensync/api/operator"
 	"github.com/crydensync/api/shiplog"
@@ -81,6 +84,16 @@ func main() {
 			log.Fatalf("invalid EMAIL_TEMPLATE_DIR: %v", err)
 		}
 		log.Printf("email templates loaded from %s", cfg.EmailTemplateDir)
+	}
+
+	// Digest history: this repo's own table, written only by the scheduler
+	// below. Declared as the interface rather than as *digest.PostgresStore
+	// for the same reason webhookStore is — a typed nil in a non-nil
+	// interface passes every nil check and then panics on use, and the
+	// router's handler guards on exactly that check.
+	var digestStore digest.Store
+	if cfg.DigestInterval > 0 {
+		digestStore = digest.NewStore(db)
 	}
 
 	engineCfg := cryden.Config{
@@ -282,6 +295,42 @@ func main() {
 		log.Printf("webhook deliveries enabled: %d event types, up to %d attempts each", events, cfg.WebhookMaxAttempts)
 	}
 
+	// The digest schedule. Started only when DIGEST_INTERVAL_HOURS asked
+	// for one, so an unconfigured deployment runs no goroutine and writes
+	// no rows — the same shape as the webhook worker above.
+	//
+	// The builder closes over the engine rather than this package taking
+	// one: the report itself is cryden's (DigestSince), and digest's job is
+	// only to record what it produced. The window is computed here and
+	// passed in, so the row states the exact interval the engine was asked
+	// to count over rather than one reconstructed from the text afterwards.
+	//
+	// Run takes context.Background() for the same reason the worker does:
+	// this repo still has no graceful shutdown, and that is noted in
+	// PROGRESS.md as owed rather than smuggled in behind a second
+	// goroutine.
+	if digestStore != nil {
+		scheduler := &digest.Scheduler{
+			Store:    digestStore,
+			Interval: cfg.DigestInterval,
+			Log:      log.Default(),
+			Build: func(ctx context.Context) (digest.Entry, error) {
+				since := time.Now().Add(-admin.DefaultDigestWindow)
+				text, err := cryden.DigestSince(ctx, engine, since)
+				if err != nil {
+					return digest.Entry{}, err
+				}
+				return digest.Entry{
+					WindowStart: since.UTC(),
+					WindowEnd:   time.Now().UTC(),
+					Text:        text,
+				}, nil
+			},
+		}
+		go scheduler.Run(context.Background())
+		log.Printf("scheduled digests enabled: one every %s", cfg.DigestInterval)
+	}
+
 	router := httpapi.NewRouter(httpapi.Deps{
 		Engine: engine,
 		DB:     db,
@@ -292,6 +341,8 @@ func main() {
 		Hooks:  webhookStore,
 
 		Shipped: shippedLog,
+
+		Digests: digestStore,
 	})
 	limiter := httpapi.NewEdgeRateLimiter(cfg.EdgeRateLimit, cfg.EdgeRateLimitWindow)
 	handler := httpapi.WithCORS(cfg.CORSOrigins, httpapi.WithEdgeRateLimit(limiter, router))
