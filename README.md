@@ -84,8 +84,22 @@ Magic-link login needs no extra configuration — it reuses the same `Verificati
 ## Rate limiting
 
 Two independent layers:
-- **Engine-level** (per-user, on login/signup specifically) — already built into CrydenSync itself, protects against credential stuffing.
-- **Edge-level** (per-IP, applied to every request) — coarser, protects the whole API surface from being hammered generally. Configurable via `EDGE_RATE_LIMIT` (default 100 requests/minute per IP). In-memory, per-process — like the engine's own limiter, this does NOT share state across multiple instances behind a load balancer. Fine for a single instance; a Redis-backed version is the natural upgrade path once you scale horizontally.
+- **Engine-level** (per-user, on login/signup/magic-link) — already built into CrydenSync itself. `RATE_LIMIT_ATTEMPTS` / `RATE_LIMIT_WINDOW_SECONDS` tune it (default 10 per minute). In-memory and per-process by default, which is correct for exactly one instance; set `REDIS_URL` and every replica counts against one shared window instead of each keeping its own. Note the trade-off that comes with that: cryden fails those three entry points closed while Redis is unreachable, rather than letting them run unlimited.
+- **Edge-level** (per-IP, applied to every request) — coarser, protects the whole API surface from being hammered generally. Configurable via `EDGE_RATE_LIMIT` (default 100 requests/minute per IP). Still in-memory and per-process, `REDIS_URL` or not — a shared window for the coarse per-IP guard is its own decision, not this one.
+
+## Anomaly detection
+
+Off by default. Set `ANOMALY_DETECTION=true` to turn on cryden's login anomaly detection and credential-stuffing detection — they share one store as their on/off switch, because they are the same login-attempt history read two ways. Both are **report-only**: a flagged attempt records an audit event (`anomaly_detected`, `credential_stuffing_detected`) and nothing else. No login is ever blocked, delayed or challenged by them, and neither returns an error a client could branch on.
+
+Every threshold below defaults to the engine's own value and only needs setting to tune it. Zero means whatever the engine says it means per knob (off for most, "no event suppression" for the stuffing cooldown) — check cryden's own `security` package before setting one to `0`.
+
+```
+ANOMALY_WINDOW_MINUTES=15              ANOMALY_HISTORY_SIZE=20
+ANOMALY_USER_FAILURE_VELOCITY=5        ANOMALY_IP_FAILURE_VELOCITY=20
+ANOMALY_MAX_CONCURRENT_SESSIONS=10     ANOMALY_TOKEN_REUSE_LOOKBACK_MINUTES=1440
+CREDENTIAL_STUFFING_WINDOW_MINUTES=60  CREDENTIAL_STUFFING_TARGET_ACCOUNTS=10
+CREDENTIAL_STUFFING_COOLDOWN_MINUTES=15
+```
 
 ## Response contract
 
@@ -142,7 +156,11 @@ POST   /v1/login/totp                (completes a paused login)
 POST   /v1/login/passkey/begin       (completes a paused login)
 POST   /v1/login/passkey/finish      (completes a paused login)
 POST   /v1/login/recovery-code       (completes a paused login)
+
+GET    /v1/admin/oauth/health        (admin required)
 ```
+
+`GET /v1/sessions` answers with *named* sessions: each entry keeps its `id`, `ip`, `user_agent` and `created_at`, and gains `label`, `device` and `location`, all computed on read from the session's own IP and User-Agent — nothing new is stored and no migration exists for it. `label` is the string a "your devices" screen shows (`Chrome on macOS`, or `Unknown device` for a client that sent no User-Agent). `location` is present but empty unless a geolocator is configured, and this repo wires none on purpose: every implementation of that interface calls somebody else's internet service, which is a deployment's decision rather than this repo's. The response shape is documented in `openapi/spec.yaml`.
 
 `{provider}` is `google`, `github`, `microsoft`, `discord`, `gitlab` or `apple`.
 The two OAuth flows are separate
@@ -162,6 +180,30 @@ returns `409 oauth_email_conflict` instead of silently linking the two
 call `/oauth/{provider}/link` while authenticated to resolve it.
 
 Authenticated endpoints expect `Authorization: Bearer <access_token>`.
+
+## Admin endpoints
+
+Everything under `/v1/admin` requires an **operator** token: a valid access token whose `role` claim is `admin`. Operator status is this repo's own concept, not cryden's — it lives in its own `operators` table (`migrations/003_operators.*.sql`), and the claim is attached to the token at issue time by the `AccessTokenClaims` provider in `main.go`. An ordinary user's token carries no `role` claim at all, so "revoked operator", "never was one" and "no such user" are indistinguishable to a caller, deliberately.
+
+The first operator is created with `cmd/grant-operator`, from a machine with direct database access — deliberately not an HTTP bootstrap route, which would be needless attack surface reachable over the network:
+
+```
+go run ./cmd/grant-operator -db "$DATABASE_URL" -email you@example.com
+go run ./cmd/grant-operator -db "$DATABASE_URL" -email you@example.com -revoke
+```
+
+Because the claim is baked in at issue time, a grant takes effect on that user's next login or refresh, and a revoke the same way — an already-issued token keeps its claim until it expires (15 minutes by default).
+
+`GET /v1/admin/oauth/health` reports, per provider, whether it is configured and whether its authorize endpoint answers:
+
+| `status` | meaning |
+| --- | --- |
+| `ok` | Answered below 500. A bare GET with no OAuth parameters legitimately gets a 4xx, which still proves the endpoint is serving. |
+| `degraded` | Answered 5xx. |
+| `unreachable` | No HTTP response at all (DNS, TLS, connect, timeout) — `error` carries the transport error. |
+| `not_configured` | No client ID/secret for it, so nothing was probed. |
+
+Probes run concurrently with a 5-second timeout each, carry no OAuth parameters and cannot start or complete a login. This is api-side logic: cryden knows whether a provider is configured, not whether it is reachable.
 
 ## Design notes
 
