@@ -8,6 +8,7 @@ import (
 	"github.com/crydensync/cryden/v2/store"
 
 	"github.com/crydensync/api/config"
+	"github.com/crydensync/api/usermeta"
 )
 
 // Deps is everything the route table needs to build its handlers. It is a
@@ -37,6 +38,11 @@ type Deps struct {
 	// records against the user total.
 	Audit store.AuditStore
 	Users store.UserStore
+
+	// Meta backs the per-user metadata endpoints. This repo's own table
+	// and package — cryden's store.User has no metadata concept and will
+	// not gain one (see usermeta's package doc).
+	Meta usermeta.Store
 }
 
 // NewRouter builds the full route table. Called once from main.go.
@@ -56,6 +62,7 @@ func NewRouter(d Deps) http.Handler {
 	recovery := &RecoveryHandlers{Engine: engine}
 	apiKeys := &APIKeyHandlers{Engine: engine}
 	security := &SecurityHandlers{Audit: d.Audit, Users: d.Users, Config: d.Config}
+	metadata := &MetadataHandlers{Users: d.Users, Meta: d.Meta}
 
 	mux := http.NewServeMux()
 
@@ -154,6 +161,21 @@ func NewRouter(d Deps) http.Handler {
 	// CLAUDE.md's hard rule about the admin surface.
 	mux.HandleFunc("GET /v1/admin/oauth/health", RequireAdmin(engine, oauthHealth.Health))
 	mux.HandleFunc("GET /v1/admin/security/hash-migration", RequireAdmin(engine, security.HashMigration))
+
+	// Per-user metadata — the table behind JWT claim mapping. Per key
+	// rather than a whole-map PUT, so two operators editing different
+	// fields of one user cannot overwrite each other's work. The user id
+	// is a path segment and is never read from the body, so there is no
+	// second place it could come from.
+	mux.HandleFunc("GET /v1/admin/users/{userID}/metadata", RequireAdmin(engine, func(w http.ResponseWriter, r *http.Request) {
+		metadata.List(w, r, r.PathValue("userID"))
+	}))
+	mux.HandleFunc("PUT /v1/admin/users/{userID}/metadata/{key}", RequireAdmin(engine, func(w http.ResponseWriter, r *http.Request) {
+		metadata.Put(w, r, r.PathValue("userID"), r.PathValue("key"))
+	}))
+	mux.HandleFunc("DELETE /v1/admin/users/{userID}/metadata/{key}", RequireAdmin(engine, func(w http.ResponseWriter, r *http.Request) {
+		metadata.Delete(w, r, r.PathValue("userID"), r.PathValue("key"))
+	}))
 
 	return mux
 }
