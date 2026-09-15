@@ -20,6 +20,7 @@ import (
 	"github.com/crydensync/api/digest"
 	"github.com/crydensync/api/httpapi"
 	"github.com/crydensync/api/operator"
+	"github.com/crydensync/api/settings"
 	"github.com/crydensync/api/shiplog"
 	"github.com/crydensync/api/templates"
 	"github.com/crydensync/api/usermeta"
@@ -94,6 +95,21 @@ func main() {
 	var digestStore digest.Store
 	if cfg.DigestInterval > 0 {
 		digestStore = digest.NewStore(db)
+	}
+
+	// The AI settings: which LLM provider and which read-only database back
+	// the AI-assisted admin features. Always constructed — NewSecrets
+	// treats an unset SETTINGS_ENCRYPTION_KEY as "this feature is off"
+	// rather than as a startup failure, and the handlers then answer 404
+	// not_configured, matching how every other optional feature in this api
+	// behaves. Only the key being *malformed* is fatal, and that is a
+	// configuration mistake worth refusing to boot on.
+	settingsSecrets, err := settings.NewSecrets(settings.NewStore(db), cfg.SettingsEncryptionKey)
+	if err != nil {
+		log.Fatalf("invalid SETTINGS_ENCRYPTION_KEY: %v", err)
+	}
+	if settingsSecrets.Configured() {
+		log.Printf("AI settings endpoints enabled (llm-provider, database-provider)")
 	}
 
 	engineCfg := cryden.Config{
@@ -355,6 +371,8 @@ func main() {
 		Shipped: shippedLog,
 
 		Digests: digestStore,
+
+		Settings: settingsSecrets,
 	})
 	limiter := httpapi.NewEdgeRateLimiter(cfg.EdgeRateLimit, cfg.EdgeRateLimitWindow)
 	handler := httpapi.WithCORS(cfg.CORSOrigins, httpapi.WithEdgeRateLimit(limiter, router))
