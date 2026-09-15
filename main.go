@@ -196,6 +196,18 @@ func main() {
 	// cryden's own documented trade-off for the shared limiter.
 	engineCfg.RateLimitAttempts = cfg.RateLimitAttempts
 	engineCfg.RateLimitWindow = cfg.RateLimitWindow
+
+	// Account lockout, passed through rather than left implicit. cryden
+	// reads these straight off its config with no defaulting of its own,
+	// and the zero values are both wrong in the same direction: a zero
+	// threshold locks an account on its first failed password, and a zero
+	// duration locks it until an instant already past — which is to say
+	// never. config.Load defaults them to cryden's own numbers (5 failures,
+	// 15 minutes) so the engine runs what this deployment believes it runs,
+	// and so GET /v1/admin/config-tuning describes settings that are
+	// actually in force.
+	engineCfg.LockoutThreshold = cfg.LockoutThreshold
+	engineCfg.LockoutDuration = cfg.LockoutDuration
 	if cfg.RedisURL != "" {
 		redisOpts, err := redis.ParseURL(cfg.RedisURL)
 		if err != nil {
