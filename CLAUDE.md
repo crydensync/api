@@ -71,7 +71,8 @@ all, it's this repo's job to add, not a reason to go patch cryden.
   that gets its own branch, same as cryden's own tiered branches.
 - **Conventional commits** (`feat:`, `fix:`, `chore:`, `docs:`,
   `test:`), one logical step per commit, same discipline cryden's own
-  history follows. Don't squash unrelated changes into one commit.
+  history follows. Don't squash unrelated changes into one commit, 
+  commit messages should not be more that five lines.
 - **Update the docs at the end of each tier**: mark it done in
   `NEXT.md`, add its section to `CURRENT-STATE.md`, log it in
   `PROGRESS.md`. A tier isn't finished until the docs say so.
