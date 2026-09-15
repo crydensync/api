@@ -9,6 +9,7 @@ import (
 
 	"github.com/crydensync/api/config"
 	"github.com/crydensync/api/usermeta"
+	"github.com/crydensync/api/webhook"
 )
 
 // Deps is everything the route table needs to build its handlers. It is a
@@ -43,6 +44,13 @@ type Deps struct {
 	// and package — cryden's store.User has no metadata concept and will
 	// not gain one (see usermeta's package doc).
 	Meta usermeta.Store
+
+	// Hooks backs the admin webhook delivery log. Nil unless WEBHOOK_URL is
+	// set, because the log is only written by a running delivery worker —
+	// there is nothing to report on in a deployment that dispatches no
+	// webhooks, and the handler answers 404 rather than an empty list an
+	// operator would read as "nothing has failed".
+	Hooks webhook.Store
 }
 
 // NewRouter builds the full route table. Called once from main.go.
@@ -63,6 +71,7 @@ func NewRouter(d Deps) http.Handler {
 	apiKeys := &APIKeyHandlers{Engine: engine}
 	security := &SecurityHandlers{Audit: d.Audit, Users: d.Users, Config: d.Config}
 	metadata := &MetadataHandlers{Users: d.Users, Meta: d.Meta}
+	hooks := &WebhookHandlers{Store: d.Hooks}
 
 	mux := http.NewServeMux()
 
@@ -176,6 +185,12 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("DELETE /v1/admin/users/{userID}/metadata/{key}", RequireAdmin(engine, func(w http.ResponseWriter, r *http.Request) {
 		metadata.Delete(w, r, r.PathValue("userID"), r.PathValue("key"))
 	}))
+
+	// The webhook delivery log — what this deployment has announced to the
+	// operator's endpoint, and what it failed to. Read-only: there is no
+	// endpoint here that re-queues or deletes a delivery, deliberately (see
+	// WebhookHandlers).
+	mux.HandleFunc("GET /v1/admin/webhooks/deliveries", RequireAdmin(engine, hooks.Deliveries))
 
 	return mux
 }

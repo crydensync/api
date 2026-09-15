@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/crydensync/api/operator"
 	"github.com/crydensync/api/templates"
 	"github.com/crydensync/api/usermeta"
+	"github.com/crydensync/api/webhook"
 )
 
 func main() {
@@ -49,6 +51,23 @@ func main() {
 	// token's claims below. See usermeta's package doc for why the
 	// reserved-key rule lives in the store rather than in the handler.
 	metadata := usermeta.NewStore(db)
+
+	// Webhook delivery log: this repo's own table, and the queue the
+	// sender writes to. Declared as the interface rather than as
+	// *webhook.PostgresStore so that leaving WEBHOOK_URL unset leaves it
+	// genuinely nil — a typed nil inside a non-nil interface is a value
+	// that passes every nil-interface check and then panics on use, and
+	// the router's handlers guard on exactly that check.
+	var webhookStore webhook.Store
+	var webhookWake chan struct{}
+	if cfg.WebhookURL != "" {
+		webhookStore = webhook.NewStore(db)
+		// Capacity 1, used purely as a nudge: the sender's job is to make
+		// the row and return, so a full channel must drop the hint rather
+		// than block. The worker's poll interval is the safety net for a
+		// hint dropped here.
+		webhookWake = make(chan struct{}, 1)
+	}
 
 	// Email templates are optional and entirely this repo's: cryden owns
 	// no message copy. An unset EMAIL_TEMPLATE_DIR leaves both senders
@@ -175,9 +194,50 @@ func main() {
 		log.Printf("engine rate limiting is Redis-backed")
 	}
 
+	// Webhooks, set here rather than in the literal above for the same
+	// reason the hasher is: assigning a nil *webhook.Sender into a
+	// notify.WebhookSender field would make it non-nil as far as cryden
+	// can tell, and cryden reads a non-nil sender with no events as a
+	// request for DefaultWebhookEvents. So the field is only ever touched
+	// when there is an endpoint to deliver to.
+	//
+	// Setting these two fields IS the dispatch wiring: cryden wraps
+	// Config.Audit in its own webhookRecorder, so there is no registry to
+	// populate. Leaving WebhookEvents empty is the deliberate default —
+	// cryden then uses DefaultWebhookEvents, which names the sixteen
+	// events worth waking someone for and excludes
+	// login_success/login_failed/token_rotated, the three that fire
+	// constantly and say nothing.
+	if webhookStore != nil {
+		engineCfg.Webhooks = &webhook.Sender{Store: webhookStore, Wake: webhookWake}
+		engineCfg.WebhookEvents = cfg.WebhookEvents
+	}
+
 	engine, err := cryden.New(engineCfg)
 	if err != nil {
 		log.Fatalf("failed to construct cryden engine: %v", err)
+	}
+
+	// The delivery worker. Started only when there is somewhere to
+	// deliver to, so an unconfigured deployment runs no goroutine at all.
+	//
+	// Run takes context.Background() because this repo has no graceful
+	// shutdown anywhere yet — main.go ends at log.Fatal(ListenAndServe),
+	// which exits the process and every goroutine with it. Introducing a
+	// real shutdown touches every component and is its own change; noted
+	// in PROGRESS.md as still owed rather than smuggled in here.
+	if webhookStore != nil {
+		worker := webhook.NewWorker(webhookStore, cfg.WebhookURL, cfg.WebhookSecret)
+		worker.MaxAttempts = cfg.WebhookMaxAttempts
+		worker.Wake = webhookWake
+		worker.Log = log.Default()
+		go worker.Run(context.Background())
+
+		events := len(cfg.WebhookEvents)
+		if events == 0 {
+			events = len(cryden.DefaultWebhookEvents())
+		}
+		log.Printf("webhook deliveries enabled: %d event types, up to %d attempts each", events, cfg.WebhookMaxAttempts)
 	}
 
 	router := httpapi.NewRouter(httpapi.Deps{
@@ -187,6 +247,7 @@ func main() {
 		Audit:  audit,
 		Users:  users,
 		Meta:   metadata,
+		Hooks:  webhookStore,
 	})
 	limiter := httpapi.NewEdgeRateLimiter(cfg.EdgeRateLimit, cfg.EdgeRateLimitWindow)
 	handler := httpapi.WithCORS(cfg.CORSOrigins, httpapi.WithEdgeRateLimit(limiter, router))
