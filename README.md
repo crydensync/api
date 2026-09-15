@@ -163,6 +163,11 @@ DELETE /v1/api-keys/{keyID}          (auth required)
 
 GET    /v1/admin/oauth/health        (admin required)
 GET    /v1/admin/security/hash-migration  (admin required)
+GET    /v1/admin/users/{userID}/metadata  (admin required)
+PUT    /v1/admin/users/{userID}/metadata/{key}     (admin required)
+DELETE /v1/admin/users/{userID}/metadata/{key}     (admin required)
+GET    /v1/admin/webhooks/deliveries (admin required)
+GET    /v1/admin/logging/recent      (admin required)
 ```
 
 `GET /v1/sessions` answers with *named* sessions: each entry keeps its `id`, `ip`, `user_agent` and `created_at`, and gains `label`, `device` and `location`, all computed on read from the session's own IP and User-Agent — nothing new is stored and no migration exists for it. `label` is the string a "your devices" screen shows (`Chrome on macOS`, or `Unknown device` for a client that sent no User-Agent). `location` is present but empty unless a geolocator is configured, and this repo wires none on purpose: every implementation of that interface calls somebody else's internet service, which is a deployment's decision rather than this repo's. The response shape is documented in `openapi/spec.yaml`.
@@ -246,6 +251,70 @@ Every one of these is scoped to the calling user by cryden itself, which derives
 
 **No endpoint in this repo authenticates *with* an API key yet.** These three manage them; cryden's `auth.AuthenticateAPIKey` is the other half, and wiring it into a `RequireAPIKey` middleware is a separate change.
 
+## User metadata
+
+`store.User` in cryden deliberately has no metadata concept — authorization and extra per-user data are a host decision, not an engine one — so per-user metadata is this repo's own table (`migrations/009_user_metadata.*.sql`) and its own package (`usermeta/`).
+
+Its purpose is **JWT claim mapping**: a console operator attaches a key to a user, and that key appears as a claim in every access token issued for them from then on. `main.go` sets `AccessTokenClaims` to `usermeta.ClaimsProvider(...)`, which merges the user's operator `role` (if any) with every stored metadata key. Because cryden calls that provider at issue time, a metadata change takes effect on that user's next login or refresh — the same latency an operator grant or revoke has, and not retroactive over tokens already issued.
+
+```json
+GET  /v1/admin/users/{userID}/metadata
+{"data": {"user_id": "...", "metadata": {"plan": "pro", "tenant_id": 41}, "reserved_claim_names": ["aud","exp","iat","iss","jti","nbf","role","sub"]}}
+
+PUT  /v1/admin/users/{userID}/metadata/plan   {"value": "pro"}
+DELETE /v1/admin/users/{userID}/metadata/plan
+```
+
+- Writes are **per key**, not a whole-map `PUT`, so two operators editing different fields of one user cannot overwrite each other's work.
+- Keys are validated `^[A-Za-z_][A-Za-z0-9_.-]{0,63}$` and refused if they collide with a registered claim name (`sub`, `role`, …) — so a bad key fails when the operator saves it, rather than at every user's next login. The rule lives in `usermeta` rather than in the handler, because it is a data invariant any writer has to pass through. `reserved_claim_names` is reported by `GET` so a console can grey those out instead of letting an operator discover the rule by rejection.
+- Values are JSON and stored as `JSONB`, so an object or array is preserved rather than being stringified. Omitting a value and sending an explicit `null` are different things, and the API keeps them different.
+- A write for a user that does not exist answers `404 not_found` rather than letting the foreign key fail and surface as a `500`. The path's `{key}` is URL-decoded by `net/http` before it reaches the handler, so a key written `a%2Fb` is judged by the validator above rather than being rejected by URL parsing.
+
+The claims provider runs **two queries on every login and every refresh** — roughly once per `ACCESS_TOKEN_TTL` per active session. That is the price of claims that are current rather than frozen at signup.
+
+## Webhooks
+
+Setting `WEBHOOK_URL` turns on cryden's webhook dispatch: the engine calls this repo's `notify.WebhookSender` for each event in `WEBHOOK_EVENTS` (unset means cryden's own default set, which deliberately excludes `login_success`, `login_failed` and `token_rotated` — the three that fire constantly and say nothing).
+
+**This repo only enqueues.** cryden calls `SendWebhook` synchronously, in the same goroutine as the login that triggered it, so an HTTP call there would be your receiver's downtime becoming your users' login latency. `SendWebhook` writes one `pending` row to `webhook_deliveries` and returns; a background worker makes the call. The row is the queue — a channel would be faster and would lose everything on restart, and a delivery log that cannot answer "was that lockout announced" for events that vanished before a row was written is not worth having.
+
+The request body is built once, at enqueue, and stored. Retries send the identical bytes, which is what lets the delivery log answer "show me what we sent that endpoint" for a retry as well as a first attempt.
+
+| header | meaning |
+| --- | --- |
+| `X-Cryden-Signature` | `sha256=` + lowercase hex HMAC-SHA256 of the raw body under `WEBHOOK_SECRET`. Absent entirely when no secret is set — never computed over an empty key. |
+| `X-Cryden-Event-Type` | the `store.AuditEventType` that fired |
+| `X-Cryden-Event-Id` | the engine's idempotency key for this occurrence, **which may be empty** (cryden generates it with `crypto/rand` and deliberately delivers without one rather than dropping the event) |
+| `X-Cryden-Delivery-Attempt` | 1-based attempt count, for the receiver's own logs. Not covered by the signature. |
+
+A receiver in Go can use `webhook.Sign`/`webhook.Verify` rather than reimplementing; in another language it is HMAC-SHA256, key = the shared secret as UTF-8, message = the body byte for byte. **Only the body is signed** — the headers above are informational and a receiver must not make a decision on them.
+
+Retries use exponential backoff (30s doubling, capped at 30m) up to `WEBHOOK_MAX_ATTEMPTS`, after which the row is `failed` and stays readable. Anything outside `2xx` is a failure, including redirects. A delivery is attempted by exactly one worker: the claim is a single `UPDATE … WHERE id IN (SELECT … FOR UPDATE SKIP LOCKED)` statement, and a row whose worker died mid-delivery is reclaimed once its `claimed_at` goes stale — so raising the worker count later needs no change to the claim.
+
+`GET /v1/admin/webhooks/deliveries?limit=&status=` lists the log newest first. `response_code` is absent when nothing came back at all (a connection failure, which an operator fixes in a different place from a receiver answering 500). There is deliberately **no** "retry this delivery" endpoint: this surface is read-only (see the design notes), and re-queuing a delivery has consequences for a third party.
+
+## Cloud logging and shipped events
+
+`CLOUD_LOGGING` composes a second, redacted, filtered copy of the engine's log records alongside the full-detail JSON line on stdout, in exactly the shape cryden's `logger` package doc prescribes:
+
+```go
+logger.NewMultiLogger(
+    logger.NewConsoleJSONLogger(),                 // full detail, stays on stdout
+    logger.NewLevelFilter(                         // and the copy that leaves
+        logger.NewMaskingRedactor(shipSink),       // without the personal data
+        cfg.LogLevel,
+    ),
+)
+```
+
+Redacting *inside* the fan-out rather than around it is the point: stdout keeps the IP address that makes an incident debuggable, and only the shipped copy loses it. `CLOUD_LOG_REDACTION` picks how — `mask` replaces the value with `[redacted]`, `hash` replaces it with a keyed HMAC digest so the same address still reads as the same address across records ("one IP, forty accounts" is the shape credential stuffing has, and a mask destroys it). `hash` requires `CLOUD_LOG_HASH_KEY`, which should be a value of its own rather than a reuse of `JWT_SECRET` — this key is handed to the component whose job is to hand its output to a third party.
+
+There is no vendor here: this repo ships no SDK, so "shipped" means "recorded in `shipped_log_events`", which `GET /v1/admin/logging/recent?limit=&level=` reads back. It is the same bytes a hosted aggregator would have received, which is what makes it a stand-in for one rather than a second, different log beside it — swapping in a real client later is a change to one line of `main.go`.
+
+- `level=warn` means **warn and above**, the same direction the `LevelFilter` above the sink reads the word. One word, one meaning, within one feature.
+- An unknown `level` is a `400` naming the four valid values, not an empty list — which is indistinguishable from "the engine has been quiet".
+- The write is **synchronous**, on the goroutine that logged. That is a real cost and is not the shape a busy deployment wants; it is the shape this one can have, because an asynchronous sink needs a flush policy and a shutdown path, and this repo has no graceful shutdown anywhere yet. A buffer that is never flushed on exit is a log that silently drops its last records before a crash, which for a log is the failure that matters most. `LOG_LEVEL` (default `info`) is what keeps the volume sane in the meantime, since the engine's debug records never reach the sink.
+
 ## Design notes
 
 - `CORS_ORIGINS` is required, no wildcard default — an API handling auth tokens should never allow every origin.
@@ -255,6 +324,10 @@ Every one of these is scoped to the calling user by cryden itself, which derives
 - A paused login is a `200`, not an error: nothing failed, the caller just has one more step. `httpapi/second_factor.go` is the one place that response shape is written.
 - `DELETE /v1/passkeys/{credentialID}` takes a JSON body (`{"password": "..."}`) — the password is re-confirmation, so a stolen access token alone cannot weaken an account's own auth requirements.
 - Passkey ceremony options and the browser's credential response travel as raw JSON (an object, not a JSON-encoded string), since that is exactly what `navigator.credentials.create()`/`.get()` produce and consume.
+- **Three of this repo's tables are not cryden's and never will be**: `user_metadata`, `webhook_deliveries`, `shipped_log_events`. cryden calls an interface and moves on; it keeps no queryable history of what a sender or a logger did, and `store.User` has no metadata concept on purpose. Each lives in its own package (`usermeta/`, `webhook/`, `shiplog/`) with a Postgres store and an in-memory double behind one interface, mirroring the `store/interfaces.go` + `store/memory` + `store/postgres` split cryden itself uses — which is what makes an endpoint over them testable with no database.
+- **The admin surface is read-only by construction.** `GET /v1/admin/webhooks/deliveries` and `GET /v1/admin/logging/recent` report; neither offers a "retry this delivery" button, a "replay this event", or any way to write a log record or a delivery row. That is the same rule cryden's AI admin tools are built under, carried across the repo boundary: an operator reads the state of the system, and every change to it goes through the explicit path that owns that change (or through the receiving system, for a delivery). Adding a write here is a design change, not a convenience.
+- `webhook_deliveries.id` is a `BIGSERIAL` surrogate key rather than the natural key you might expect. The event id it corresponds to **can be empty** — cryden generates it with `crypto/rand` and deliberately delivers an event without one rather than dropping it — and a delivery log whose primary key could be blank is a log that loses exactly the rows you would most want to see. The engine's own id is recorded beside it as `event_id` and is used for the receiver's idempotency.
+- This repo has **no graceful shutdown**, and as of this tier that is a stated gap rather than an unnoticed one: `main.go` ends at `log.Fatal(http.ListenAndServe(...))`, so the webhook worker's context is never cancelled and the shipped-events sink has no flush-and-exit path. Both were built so that adding one later is a change to `main.go` alone — the worker takes a `context.Context`, which today is `context.Background()`. The sink writes synchronously for the same reason: a buffered sink with no shutdown path drops its last records on a crash.
 
 ## License
 
