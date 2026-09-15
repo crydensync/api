@@ -35,14 +35,14 @@ Assumptions made, none blocking:
   operator all get the identical `403 not_operator` — that distinction
   is not something to expose to the caller.
 
-Next: Tier 1 (auth methods), each on its own branch per `CODEX.md`.
+Next: Tier 1 (auth methods), each on its own branch per `CLAUDE.md`.
 Copying cryden's migrations `0003`-`0007` into this repo (renumbered
 continuing from `003_operators`) is the first sub-step, before any
 TOTP/WebAuthn/magic-link/recovery-code endpoint work starts.
 
 ## 2026-09-14 — Tier 1 (auth methods) except Apple
 
-Branch `feat/tier1-auth-methods`, per `CODEX.md`'s one-branch-per-tier
+Branch `feat/tier1-auth-methods`, per `CLAUDE.md`'s one-branch-per-tier
 rule. First session in this repo with a working Go toolchain: Go 1.25.0
 plus cryden v2.5.0 and every dependency already in the module cache,
 so the caveat the Tier 0 entry left open is closed — `go mod tidy`
@@ -52,7 +52,7 @@ was verified: **the DB-backed smoke test was not run** (no Postgres and
 no network in this sandbox) and neither were the WebAuthn ceremonies,
 which need a real browser authenticator. Those still owe a first run
 against a real database. Saying that plainly here rather than counting
-green builds as "verified end to end", per `CODEX.md`.
+green builds as "verified end to end", per `CLAUDE.md`.
 
 Built, in commit order:
 
@@ -195,12 +195,12 @@ network), the DB-backed smoke test (no Postgres), and the WebAuthn
 ceremonies (no browser authenticator). Those remain the first things to
 run on a real deployment.
 
-Next: Tier 2, on its own branch per `CODEX.md` — and before or alongside
+Next: Tier 2, on its own branch per `CLAUDE.md` — and before or alongside
 it, the first DB-backed smoke-test run of everything in Tier 1.
 
 ## 2026-09-15 — Tier 2 (config, named sessions, OAuth health)
 
-Branch `feat/tier2-config-and-oauth-health`, per `CODEX.md`'s
+Branch `feat/tier2-config-and-oauth-health`, per `CLAUDE.md`'s
 one-branch-per-tier rule. Three commits, in order:
 
 - `feat: wire anomaly detection and the Redis rate limiter from env` —
@@ -319,7 +319,7 @@ rather than silently patched):
   smoketest does not have). An optional operator token/email flag would
   fix it if that coverage is wanted later.
 
-Next: Tier 3, on its own branch per `CODEX.md`. Still owed from before
+Next: Tier 3, on its own branch per `CLAUDE.md`. Still owed from before
 it: the first DB-backed smoke-test run, now worth doing against a
 `REDIS_URL`-less and a `REDIS_URL`-set instance so the shared limiter
 gets its first real exercise.
@@ -382,7 +382,7 @@ trailing `// dev stand-in` comments, which align against the longest
 line in their group. Both fixed with `gofmt -w`.
 
 **What was checked before the toolchain was reachable** — since
-`CODEX.md`'s rule is to say what was and was not done rather than to
+`CLAUDE.md`'s rule is to say what was and was not done rather than to
 imply a build — every cryden symbol Stage 1 calls was read directly out
 of the module cache at `…/cryden/v2@v2.5.0`, first-hand, not recalled.
 Confirmed:
@@ -626,7 +626,7 @@ so the field is `Errors`.
 
 ### Verification: what this does NOT cover
 
-Said plainly, per `CODEX.md`, rather than implied by a green suite:
+Said plainly, per `CLAUDE.md`, rather than implied by a green suite:
 
 - **There is no Postgres and no network in this sandbox.**
   `migrations/009`, `010` and `011` have **never been applied to a real
