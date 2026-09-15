@@ -157,7 +157,12 @@ POST   /v1/login/passkey/begin       (completes a paused login)
 POST   /v1/login/passkey/finish      (completes a paused login)
 POST   /v1/login/recovery-code       (completes a paused login)
 
+POST   /v1/api-keys                  (auth required, raw key returned once)
+GET    /v1/api-keys                  (auth required)
+DELETE /v1/api-keys/{keyID}          (auth required)
+
 GET    /v1/admin/oauth/health        (admin required)
+GET    /v1/admin/security/hash-migration  (admin required)
 ```
 
 `GET /v1/sessions` answers with *named* sessions: each entry keeps its `id`, `ip`, `user_agent` and `created_at`, and gains `label`, `device` and `location`, all computed on read from the session's own IP and User-Agent — nothing new is stored and no migration exists for it. `label` is the string a "your devices" screen shows (`Chrome on macOS`, or `Unknown device` for a client that sent no User-Agent). `location` is present but empty unless a geolocator is configured, and this repo wires none on purpose: every implementation of that interface calls somebody else's internet service, which is a deployment's decision rather than this repo's. The response shape is documented in `openapi/spec.yaml`.
@@ -205,10 +210,46 @@ Because the claim is baked in at issue time, a grant takes effect on that user's
 
 Probes run concurrently with a 5-second timeout each, carry no OAuth parameters and cannot start or complete a login. This is api-side logic: cryden knows whether a provider is configured, not whether it is reachable.
 
+`GET /v1/admin/security/hash-migration` reports how far a password-hash migration has got:
+
+```json
+{"data": {
+  "hasher": {"algorithm": "argon2id", "memory_kib": 65536, "iterations": 3, "parallelism": 4},
+  "total_users": 1234,
+  "upgraded_events": 900,
+  "estimated_remaining": 334,
+  "window_days": 7,
+  "upgraded_events_in_window": 120
+}}
+```
+
+Set `PASSWORD_HASHER=argon2id` and every login whose stored hash is out of date gets rewritten with Argon2id — that gradual rewrite is the migration, and there is no separate command to run. This endpoint only watches it:
+
+- `hasher` is what this deployment is configured to **write**, read from config, not from the users table. cryden deliberately exposes no bulk way to inspect stored hash algorithms, and adding one would be the engine's job rather than this repo's.
+- `upgraded_events` counts **events**, not users. A user whose hash is rewritten twice — a second cost increase a year later — contributes two, so this number can exceed `total_users`.
+- `estimated_remaining` is therefore *estimated*, floored at zero, and is `total_users - upgraded_events`.
+- `upgraded_events_in_window` is the field that actually answers "is this draining": the all-time count only ever rises, while a windowed one falls to zero as the last stragglers log in. `window_days` (1–365, default 7) sets that window.
+
+## API keys
+
+`POST /v1/api-keys` mints a machine-to-machine credential for the calling user and returns the raw key **once** — cryden stores only its SHA-256 hash and can never reproduce it, so a caller that loses it has to mint a new one. The response carries the raw key, the stored record (`id`, `name`, `prefix`, `scopes`, `expires_at`, `expired`, `created_at`, `last_used_at`) and a `notice` saying so; a client that renders the key without that notice is the failure this guards against.
+
+```json
+POST /v1/api-keys   {"name": "ci deploy", "scopes": ["read"], "expires_in_days": 90}
+```
+
+- `expires_in_days` of `0` or absent means the key never expires, which is cryden's own default and the honest one for a credential living in a deploy pipeline's environment: revocation, not expiry, is what actually stops a key.
+- `GET /v1/api-keys` lists the calling user's live keys. Revoked keys are absent; expired-but-unrevoked ones are present with `"expired": true`, because "your CI key expired on Tuesday" is exactly what someone needs to see to understand why a pipeline broke.
+- `DELETE /v1/api-keys/{keyID}` revokes, irreversibly — the reason a key gets revoked is that somebody else may have it, so mint a new one rather than offering an un-revoke.
+
+Every one of these is scoped to the calling user by cryden itself, which derives the user ID from the verified token rather than from the request. A key belonging to another account, a key that does not exist, and an already-revoked key all answer the same `404 api_key_not_found` — a caller can never learn whether somebody else's key exists.
+
+**No endpoint in this repo authenticates *with* an API key yet.** These three manage them; cryden's `auth.AuthenticateAPIKey` is the other half, and wiring it into a `RequireAPIKey` middleware is a separate change.
+
 ## Design notes
 
 - `CORS_ORIGINS` is required, no wildcard default — an API handling auth tokens should never allow every origin.
-- `consoleEmailSender` (in `email_sender.go`) is a dev stand-in — logs verification tokens to the console instead of sending real email. Replace with a real provider (Resend, SES, SendGrid) before real users depend on email verification.
+- `consoleEmailSender` (in `email_sender.go`) is a dev stand-in — logs verification tokens to the console instead of sending real email. Replace with a real provider (Resend, SES, SendGrid) before real users depend on email verification. Set `EMAIL_TEMPLATE_DIR` and it renders your own `verification.txt` / `magic_link.txt` (`text/template`, fields `{{.To}}`, `{{.Token}}`, `{{.URL}}`) instead of its built-in line; cryden owns no message copy on purpose, so templates are entirely this repo's — see `templates/`.
 - Every engine error is mapped to a stable `(status, code)` pair in `httpapi/errors.go` — add new engine errors there once, every handler benefits. `*auth.ErrOAuthEmailConflict` is the one non-sentinel case in that file (it's a struct carrying `Email`/`Provider`, unwrapped via `errors.As` rather than `errors.Is`).
 - The OAuth linking flow's HMAC-signed cookie (`oauth_handlers.go`) is genuinely new plumbing, not copied from an existing pattern elsewhere in this repo — worth reading closely if you're touching that code, not just trusting it because it compiles.
 - A paused login is a `200`, not an error: nothing failed, the caller just has one more step. `httpapi/second_factor.go` is the one place that response shape is written.

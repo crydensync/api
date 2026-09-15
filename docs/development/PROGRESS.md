@@ -323,3 +323,170 @@ Next: Tier 3, on its own branch per `CODEX.md`. Still owed from before
 it: the first DB-backed smoke-test run, now worth doing against a
 `REDIS_URL`-less and a `REDIS_URL`-set instance so the shared limiter
 gets its first real exercise.
+
+## 2026-09-15 — Tier 3, Stage 1 (config, API keys, hash migration)
+
+Tier 3 was split into two stages with an explicit mid-point check-in.
+Stage 1 is written; Stage 2 (per-user metadata + JWT claims, webhooks +
+delivery log, shipped-events log) has not been started.
+
+Most of this session had **no command execution at all**. Every
+command-executing tool — `Bash`, `Monitor`, and subagents alike —
+failed with `deepseek-v4-flash is temporarily unavailable, so auto mode
+cannot determine the safety of ...`. Only file reads and writes worked.
+So Stage 1 was written, and its cryden symbols verified by reading the
+module cache, without a single build. This is a *different* failure from
+the `bwrap`/`apply_patch` breakage the Tier 2 entry describes: the Go
+1.25.0 toolchain and the full module cache were still here and still
+working — what was unavailable was command execution, not the toolchain.
+
+Command execution came back at the end of the session, and everything
+was then actually run on `feat/tier3-config-and-endpoints` (branch
+created once git was reachable):
+
+```
+go build ./...   clean
+go vet ./...     clean
+gofmt -l .       empty, after two fixes (below)
+go test -count=1 ./...
+  ok  github.com/crydensync/api/config    0.012s
+  ok  github.com/crydensync/api/httpapi   6.129s
+  ok  github.com/crydensync/api/templates 0.008s
+```
+
+Every Tier 3 test was also confirmed passing individually, including
+`TestHashMigrationTracksARealBcryptToArgon2idUpgrade`, which drives the
+real upgrade path (sign up on Argon2id, overwrite the stored hash with
+bcrypt, log in, assert the engine's own rewrite is reported) rather
+than a hand-seeded audit row.
+
+Stage 1 landed as four commits on that branch, each verified on its own
+(`go build`/`go vet`/`gofmt -l`/`go test -count=1` after every one, not
+only the last): the `Deps` refactor, then config + templates, then the
+API key endpoints, then the hash-migration report. Splitting them meant
+reconstructing intermediate states of `main.go`, `httpapi/router.go` and
+`httpapi/errors.go`, which each carry hunks belonging to more than one
+commit — `git add -p` is unavailable in this environment, so each
+file's part-way state was written, built and committed in order. The
+final state of all three was diffed against the version the full-suite
+run above covered; the only difference is one reworded doc comment in
+`router.go`, and that exact tree was rebuilt and retested.
+
+`gofmt` was the one place the reasoning-first approach was actually
+wrong, and it is worth recording which half: hand-reasoned struct field
+alignment was **correct** — none of `apiKeyDTO`, `hasherDTO`,
+`hashMigrationDTO` or `templates.Data` were flagged — but two spots
+nobody had considered were: a `map[string]any` literal in
+`apikey_handlers.go` whose keys needed aligning, and `main.go`'s
+trailing `// dev stand-in` comments, which align against the longest
+line in their group. Both fixed with `gofmt -w`.
+
+**What was checked before the toolchain was reachable** — since
+`CODEX.md`'s rule is to say what was and was not done rather than to
+imply a build — every cryden symbol Stage 1 calls was read directly out
+of the module cache at `…/cryden/v2@v2.5.0`, first-hand, not recalled.
+Confirmed:
+
+- `cryden.GenerateAPIKey(ctx, e, userID, name, scopes, ttl)`,
+  `ListAPIKeys(ctx, e, userID)`, `RevokeAPIKey(ctx, e, userID, keyID)`
+  all exist as root-package facade functions (`cryden.go`), with
+  exactly the shapes the handlers call. `NEXT.md`'s Tier 3 spec names
+  them the same way, so the spec was accurate here.
+- `cryden.APIKey` is a **root-package** struct (`ID`, `Name`, `Prefix`,
+  `Scopes`, `ExpiresAt *time.Time`, `CreatedAt`, `LastUsedAt`) with an
+  `Expired()` method — *not* `store.APIKey`, which is the storage-side
+  record and does carry `KeyHash`. The handler's DTO is built from the
+  public one, which is what makes "no key hash can be marshalled by
+  accident" structural rather than a rule to remember.
+- `cryden.ErrAPIKeysNotConfigured` exists (`cryden.go`), and
+  `auth.ErrInvalidAPIKey` / `ErrAPIKeyNotFound` / `ErrInvalidAPIKeyScope`
+  / `ErrInvalidAPIKeyTTL` exist with the messages mapped in
+  `httpapi/errors.go`.
+- `auth.apiKeyPrefixFragment` builds the stored `Prefix` as
+  `"ck_" + first 8 chars of the secret` — so it is `ck_9f3a1c02`, not
+  the bare label. A first draft of the API-key test asserted `== "ck"`
+  and would have failed; found by reading the engine's implementation
+  and fixed before any run.
+- `logger.ParseLevel` is case- and whitespace-insensitive, accepts
+  `warning`/`err` as well as `warn`/`error`, and returns the zero
+  `Level` with `ErrUnknownLevel` on a miss — the doc comment on it is
+  explicit that neither defaulting direction is acceptable.
+- `logger`'s own package doc pins the intended composition for Stage 2
+  as `NewMultiLogger(NewConsoleJSONLogger(), NewLevelFilter(NewMaskingRedactor(sink), level))`
+  — redaction *inside* the fan-out, so local stdout keeps the IP and
+  only the outbound copy loses it.
+
+Stage 1, by file:
+
+- `httpapi/router.go` — `NewRouter(engine, db, cfg)` becomes
+  `NewRouter(Deps)`, since Tier 3's admin endpoints need store instances
+  `cryden.Engine` keeps unexported. Two call sites: `main.go` and
+  `oauth_health_test.go`. Handlers guard a nil store and answer
+  `404 not_configured`.
+- `config/config.go` — `PASSWORD_HASHER`, the five `ARGON2ID_*` knobs,
+  `API_KEY_PREFIX`, `LOG_LEVEL`, `CLOUD_LOGGING`,
+  `CLOUD_LOG_REDACTION`, `CLOUD_LOG_HASH_KEY`, `EMAIL_TEMPLATE_DIR`,
+  plus `envString`/`envUint32`/`envUint8`. The unsigned readers exist so
+  a minus sign is a startup failure rather than a value that wraps to
+  255 lanes.
+- `templates/` (new) — `text/template` over `verification.txt` /
+  `magic_link.txt`, fields `{{.To}} {{.Token}} {{.URL}}`. Each message
+  falls back independently; a directory with neither file, or an
+  unparseable one, is a startup failure.
+- `email_sender.go` — both console senders render a configured template
+  when there is one and print their original line byte-for-byte when
+  there is not.
+- `httpapi/apikey_handlers.go` + test — the three routes, one-time raw
+  key with a notice, bounded `expires_in_days`, scoped revoke.
+- `httpapi/security_handlers.go` + test —
+  `GET /v1/admin/security/hash-migration`, behind `RequireAdmin`.
+- `httpapi/errors.go`, `query.go`, `response.go`, `main.go`,
+  `.env.example`, `README.md`, `openapi/spec.yaml` (1.2).
+
+Two test bugs were found and fixed by reading rather than by a red test,
+worth recording because neither would have been caught by a type check:
+the `"ck"` prefix assertion above, and
+`TestAPIKeyRevokeIsScopedToTheCallingUser` originally built its two
+accounts on **separate engines**, so its 404 came from a key that simply
+was not in that store — proving nothing about the `WHERE id = $1 AND
+user_id = $2` predicate it claimed to test. Both accounts now share one
+engine.
+
+Decisions and assumptions, none blocking:
+
+- **The hash-migration report's field names are load-bearing.**
+  `upgraded_events` counts events, so it can exceed `total_users` after
+  a second cost increase; `estimated_remaining` is therefore *estimated*
+  and floored at zero. Naming it `remaining` would be a number an
+  operator trusts more than they should. README and spec both say so in
+  prose.
+- **Stage 1 ships cloud-logging config with nothing reading it yet.**
+  The user's own staging put "cloud-logger config" in Stage 1 and the
+  shipped-events log in Stage 2, so `CloudLogging`/`LogLevel`/
+  `CloudLogRedaction` are parsed and validated now and composed in
+  `main.go` when Stage 2 lands. Since both stages land on one branch
+  before any merge, no release ever sees the dead switch — but a
+  reviewer reading Stage 1 alone will notice it, so it is said here.
+- **`BCRYPT_COST` was not added.** A real engine knob with no env var
+  here, but Tier 3 asks for Argon2id; flagged rather than taken as
+  scope.
+- **The Argon2id params are always assembled**, even when the selected
+  hasher is bcrypt, so the report can state what the deployment is
+  configured to write without rebuilding that answer from a second
+  place.
+
+Noticed while working, not fixed:
+
+- **`openapi/spec.yaml` still predates Tier 1**, unchanged from the Tier
+  2 note. Stage 1 added only its own paths on top of that gap.
+- **This repo still has no graceful shutdown.** `main.go` ends at
+  `log.Fatal(http.ListenAndServe(...))`. Stage 2's webhook worker wants
+  a context it can be stopped with, so the worker takes one and gets
+  `context.Background()` — introducing real shutdown is its own change
+  touching every component, and smuggling it in behind a worker would
+  not be honest about its size.
+
+Next: Stage 2, once someone can run a build. The check-in the user
+asked for is the point at which this entry was written; Stage 1's code
+should be built, vetted, formatted and tested before Stage 2 starts on
+top of it.
