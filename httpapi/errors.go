@@ -10,6 +10,8 @@ import (
 	"github.com/crydensync/cryden/v2/store"
 	"github.com/crydensync/cryden/v2/token"
 
+	"github.com/crydensync/api/aiprovider"
+	"github.com/crydensync/api/settings"
 	"github.com/crydensync/api/usermeta"
 )
 
@@ -151,6 +153,36 @@ func mapError(err error) apiError {
 		return apiError{http.StatusBadRequest, "invalid_metadata_key", "a metadata key must start with a letter or underscore and contain only letters, digits, underscores, dots and dashes, up to 64 characters"}
 	case errors.Is(err, usermeta.ErrNotFound):
 		return apiError{http.StatusNotFound, "metadata_key_not_found", "no such metadata key on this user"}
+	// The settings behind the AI-assisted admin features. The two invalid
+	// cases are a form the operator can fix, so they say which field and
+	// which bound rather than a generic "bad request" — the caller is
+	// already an operator, and none of it is secret.
+	case errors.Is(err, errSettingsNotConfigured):
+		return apiError{http.StatusNotFound, "not_configured", "the AI settings endpoints are not configured on this deployment"}
+	case errors.Is(err, settings.ErrInvalidLLMProvider):
+		return apiError{http.StatusBadRequest, "invalid_llm_provider", "that LLM provider configuration is not usable"}
+	case errors.Is(err, settings.ErrInvalidDatabaseProvider):
+		return apiError{http.StatusBadRequest, "invalid_database_provider", "that database provider configuration is not usable"}
+	case errors.Is(err, settings.ErrInvalidAskAIWidget):
+		return apiError{http.StatusBadRequest, "invalid_ask_ai_widget", "that ask-ai widget configuration is not usable"}
+	// The read-only check. A role that can write is refused outright
+	// rather than stored with a warning: cryden's design decision is that
+	// this credential boundary, not the allowlist, is what makes the AI
+	// query surface safe, so a writable role is a broken guarantee and
+	// not a preference. "Could not verify" is a different answer for the
+	// same reason — it is not a pass.
+	case errors.Is(err, aiprovider.ErrNotReadOnly):
+		return apiError{http.StatusBadRequest, "database_role_not_read_only", "that database role can write, so it cannot back the AI query surface — create a role with SELECT only and use that"}
+	case errors.Is(err, aiprovider.ErrCannotVerifyReadOnly):
+		return apiError{http.StatusBadRequest, "database_role_unverified", "could not verify that the database role is read-only, so it was not stored — check the connection string and that the role can connect"}
+	// A stored credential this deployment's key cannot open. Distinct
+	// from "not configured" on purpose: the row is still there, and
+	// telling an operator it is missing would send them to re-enter a
+	// credential that nothing is wrong with.
+	case errors.Is(err, settings.ErrUndecryptable):
+		return apiError{http.StatusConflict, "setting_undecryptable", "this setting is stored but cannot be decrypted — SETTINGS_ENCRYPTION_KEY has probably changed; re-enter the credential or clear the setting"}
+	case errors.Is(err, settings.ErrNoEncryptionKey):
+		return apiError{http.StatusNotFound, "not_configured", "the AI settings endpoints are not configured on this deployment"}
 	// The five "not configured" sentinels below mean this deployment has
 	// not enabled that feature, not that the caller did anything wrong.
 	// 404 rather than 500 so a client can hide the option instead of

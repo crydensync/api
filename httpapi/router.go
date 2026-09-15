@@ -9,6 +9,7 @@ import (
 
 	"github.com/crydensync/api/config"
 	"github.com/crydensync/api/digest"
+	"github.com/crydensync/api/settings"
 	"github.com/crydensync/api/shiplog"
 	"github.com/crydensync/api/usermeta"
 	"github.com/crydensync/api/webhook"
@@ -70,6 +71,14 @@ type Deps struct {
 	// The on-demand GET /v1/admin/digest needs nothing from here — it
 	// reads the engine's audit history and records nothing.
 	Digests digest.Store
+
+	// Settings backs the /v1/admin/settings/* endpoints: the LLM provider
+	// and the read-only database behind the AI-assisted admin features.
+	// Nil unless SETTINGS_ENCRYPTION_KEY is set — without a key there is
+	// nowhere safe to put a credential, so those endpoints answer 404
+	// not_configured rather than accepting one they would have to store in
+	// the clear. See settings.Secrets.
+	Settings *settings.Secrets
 }
 
 // NewRouter builds the full route table. Called once from main.go.
@@ -95,6 +104,7 @@ func NewRouter(d Deps) http.Handler {
 	digests := &DigestHandlers{Engine: engine, Store: d.Digests}
 	support := &SupportHandlers{Engine: engine}
 	tuning := &TuningHandlers{Audit: d.Audit, Config: d.Config}
+	aiSettings := &SettingsHandlers{Secrets: d.Settings}
 
 	mux := http.NewServeMux()
 
@@ -189,8 +199,10 @@ func NewRouter(d Deps) http.Handler {
 	// this repo's own logic — cryden has no concept of a provider being
 	// reachable, and no bulk way to read stored hash algorithms.
 	//
-	// Every endpoint here is read-only, and has to stay that way: see
-	// CLAUDE.md's hard rule about the admin surface.
+	// Every endpoint here is read-only, and has to stay that way — the one
+	// exception is the /v1/admin/settings/* block at the bottom of this
+	// table, which is a settings save and not an action any AI tool can
+	// reach. See CLAUDE.md's hard rule about the admin surface.
 	mux.HandleFunc("GET /v1/admin/oauth/health", RequireAdmin(engine, oauthHealth.Health))
 	mux.HandleFunc("GET /v1/admin/security/hash-migration", RequireAdmin(engine, security.HashMigration))
 
@@ -246,6 +258,31 @@ func NewRouter(d Deps) http.Handler {
 	// it concerns and a human saves that change through the ordinary
 	// settings path. See TuningHandlers and CLAUDE.md's hard rule.
 	mux.HandleFunc("GET /v1/admin/config-tuning", RequireAdmin(engine, tuning.ConfigTuning))
+
+	// The AI settings surface — the only writes under /v1/admin, and the
+	// "human saves it" half of pre-fill-never-auto-apply.
+	//
+	// The read-only rule above is about the AI *tools*, which are what the
+	// engine's interfaces make read-only by carrying no method that can
+	// act. These endpoints are the ordinary settings save path those tools'
+	// output is allowed to pre-fill, and they are where the credentials
+	// behind the tools live; they do not accept a suggestion, and no AI
+	// feature holds a reference to this handler. See SettingsHandlers.
+	//
+	// PUT database-provider is not a plain write: it connects with the
+	// supplied credentials and confirms the server refuses a write before
+	// storing anything, so a role that can modify the database is rejected
+	// at the form rather than trusted. That is why the endpoint is
+	// noticeably slower than its neighbours.
+	mux.HandleFunc("GET /v1/admin/settings/llm-provider", RequireAdmin(engine, aiSettings.LLMProvider))
+	mux.HandleFunc("PUT /v1/admin/settings/llm-provider", RequireAdmin(engine, aiSettings.PutLLMProvider))
+	mux.HandleFunc("DELETE /v1/admin/settings/llm-provider", RequireAdmin(engine, aiSettings.DeleteLLMProvider))
+	mux.HandleFunc("GET /v1/admin/settings/database-provider", RequireAdmin(engine, aiSettings.DatabaseProvider))
+	mux.HandleFunc("PUT /v1/admin/settings/database-provider", RequireAdmin(engine, aiSettings.PutDatabaseProvider))
+	mux.HandleFunc("DELETE /v1/admin/settings/database-provider", RequireAdmin(engine, aiSettings.DeleteDatabaseProvider))
+	mux.HandleFunc("GET /v1/admin/settings/ask-ai-widget", RequireAdmin(engine, aiSettings.AskAIWidget))
+	mux.HandleFunc("PUT /v1/admin/settings/ask-ai-widget", RequireAdmin(engine, aiSettings.PutAskAIWidget))
+	mux.HandleFunc("DELETE /v1/admin/settings/ask-ai-widget", RequireAdmin(engine, aiSettings.DeleteAskAIWidget))
 
 	return mux
 }
