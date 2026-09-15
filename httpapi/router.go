@@ -9,14 +9,33 @@ import (
 	"github.com/crydensync/api/config"
 )
 
+// Deps is everything the route table needs to build its handlers. It is a
+// struct rather than a parameter list because the admin surface keeps
+// growing: every endpoint added under /v1/admin needs something the route
+// table does not have today, and a struct absorbs that without every
+// existing call site growing a positional argument. It also lets a test
+// build a router with exactly the dependencies the endpoint under test
+// needs and leave the rest nil.
+type Deps struct {
+	Engine *cryden.Engine
+
+	// DB is used only by the health handler, which pings it. Nil is fine
+	// for a router built without a database (tests); /v1/health then
+	// reports the database as unconfigured rather than panicking.
+	DB     *sql.DB
+	Config config.Config
+}
+
 // NewRouter builds the full route table. Called once from main.go.
-func NewRouter(engine *cryden.Engine, db *sql.DB, cfg config.Config) http.Handler {
+func NewRouter(d Deps) http.Handler {
+	engine := d.Engine
+
 	auth := &AuthHandlers{Engine: engine}
 	sessions := &SessionHandlers{Engine: engine}
 	account := &AccountHandlers{Engine: engine}
 	email := &EmailHandlers{Engine: engine}
-	health := &HealthHandler{DB: db}
-	oauth := &OAuthHandlers{Engine: engine, Config: cfg}
+	health := &HealthHandler{DB: d.DB}
+	oauth := &OAuthHandlers{Engine: engine, Config: d.Config}
 	oauthHealth := NewOAuthHealthHandlers(oauth)
 	totp := &TOTPHandlers{Engine: engine}
 	passkeys := &PasskeyHandlers{Engine: engine}
