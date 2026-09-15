@@ -13,7 +13,11 @@ not a router change; Apple is the one that does not fit that shape and
 has its own `httpapi/apple.go` — see `NEXT.md` Tier 1).
 
 Tier 2 added one admin endpoint on top of those, the first in this repo
-— see below.
+— see below. Tier 3 added three more admin endpoints and this repo's
+first three tables of its own, plus the config that lights up Argon2id,
+cloud logging and email templates — see below. Every admin endpoint in
+this repo is either read-only or an explicit operator action on a named
+key; nothing on that surface applies a suggestion by itself.
 
 Tier 1 also added the second-factor surface: TOTP enroll/confirm/
 disable, passkey registration/list/delete, magic-link request/complete,
@@ -217,7 +221,94 @@ cryden copies.
   `internal/smoketest`'s sessions check also stops accepting "200 with
   anything in it".
 
-## Tier 3 through 5
+## Tier 3 — config plus real endpoints: DONE
+
+The first tier that adds things cryden has no concept of. Built in two
+stages on `feat/tier3-config-and-endpoints`; `go build`, `go vet`,
+`gofmt -l` and `go test ./...` are clean, and `PROGRESS.md` records what
+that does and does not cover.
+
+**Config that lights up an engine feature** (cryden already implements
+all of it; this repo supplies values):
+
+- **Argon2id** (`PASSWORD_HASHER=argon2id` plus the five `ARGON2ID_*`
+  knobs). `Argon2idParams` starts from `security.DefaultArgon2idParams`
+  and each env var overrides only the field it names — cryden's
+  `NewArgon2idHasher` uses a partially-filled struct as a real custom
+  configuration rather than as "defaults plus overrides", so building
+  one from only the vars that happened to be set would silently drop
+  the rest to zero. Switching hasher is safe at any time and needs no
+  migration: existing bcrypt hashes keep verifying and are rewritten one
+  successful login at a time.
+- **Cloud logging** (`CLOUD_LOGGING`, `LOG_LEVEL`,
+  `CLOUD_LOG_REDACTION`, `CLOUD_LOG_HASH_KEY`) — see the shipped-events
+  log below.
+- **Email templates** (`EMAIL_TEMPLATE_DIR`, new `templates/` package):
+  cryden deliberately owns no message copy, so this is entirely this
+  repo's. `verification.txt` and `magic_link.txt` rendered with
+  `text/template` (`{{.To}}`, `{{.Token}}`, `{{.URL}}`). Unset keeps the
+  console senders' built-in lines byte for byte; a set-but-broken
+  directory is a startup failure.
+- **API keys** (`API_KEY_PREFIX`, `POST`/`GET /v1/api-keys`,
+  `DELETE /v1/api-keys/{keyID}`, all `RequireAuth`): cryden scopes every
+  one to the calling user by deriving the user ID from the verified
+  token, so a key belonging to another account, a key that does not
+  exist and an already-revoked key all answer the same `404
+  api_key_not_found`. The raw key is returned once and never again —
+  cryden stores only its SHA-256 hash. **No endpoint authenticates
+  *with* an API key yet**; that is a separate change.
+
+**Endpoints over this repo's own tables:**
+
+- **`GET /v1/admin/security/hash-migration`** (`RequireAdmin`,
+  read-only): `store.UserStore.Count` against two `CountByType` calls on
+  `EventPasswordHashUpgraded` — all-time and windowed — so an operator
+  can watch a bcrypt-to-Argon2id migration drain. `upgraded_events`
+  counts events, not users, so the field that actually answers "is this
+  draining" is `upgraded_events_in_window`, and `estimated_remaining` is
+  named as an estimate on purpose.
+- **Per-user metadata** (`usermeta/`, `migrations/009`): this repo's own
+  table, because cryden's `store.User` deliberately has no metadata
+  concept. Its purpose is JWT claim mapping — `main.go` sets
+  `AccessTokenClaims` to `usermeta.ClaimsProvider(...)`, which merges
+  the operator `role` with every stored key, so a metadata change lands
+  on that user's next login or refresh and never retroactively. Admin
+  `GET`/`PUT`/`DELETE /v1/admin/users/{userID}/metadata[/{key}]`, per key
+  rather than whole-map so two operators cannot lose each other's work.
+  Key validation and the reserved-claim rule live in the store, not the
+  handler, so they hold for any writer. The prefix merge costs **two
+  queries on every login and every refresh**.
+- **Webhook delivery log** (`webhook/`, `migrations/010`): `WEBHOOK_URL`
+  is the on/off switch. cryden calls `notify.WebhookSender` on the login
+  request path, so `SendWebhook` writes one `pending` row and returns;
+  a background worker makes the call. **The row is the queue** — a
+  channel would lose everything on restart. Exponential backoff 30s
+  doubling to 30m up to `WEBHOOK_MAX_ATTEMPTS`, then `failed` and left
+  readable. The body is built at enqueue and stored, so a retry sends
+  identical bytes and the log can answer "what did we send" for a retry
+  as well as a first attempt. `GET /v1/admin/webhooks/deliveries`
+  (admin, read-only, no retry button). `id` is a `BIGSERIAL` surrogate
+  rather than the event id, which cryden may leave **empty**.
+- **Shipped-events log** (`shiplog/`, `migrations/011`): this repo ships
+  no vendor SDK, so "shipped" means recorded in `shipped_log_events`,
+  read back by `GET /v1/admin/logging/recent`. `main.go` composes
+  exactly the shape cryden's `logger` doc prescribes — redacting
+  *inside* the `MultiLogger` fan-out, so stdout keeps the IP that makes
+  an incident debuggable and only the copy leaving loses it. `level=`
+  means "at or above", the same direction the `LevelFilter` reads.
+  `LOG_LEVEL` (default `info`) keeps the volume sane.
+
+The three new tables (`009`–`011`) have **never been applied to a real
+database** — there is no Postgres in this sandbox. The webhook worker's
+claim and backoff behaviour is tested against `httptest` and an
+in-memory double, not against Postgres `FOR UPDATE SKIP LOCKED`, and
+that double cannot reproduce two workers racing. `PROGRESS.md` says all
+of this plainly.
+
+## Tier 4 and 5
 
 Not started. See `NEXT.md` for the full, ordered, specced-in-detail
-queue.
+queue. Tier 4 is all behind `RequireAdmin` and stays read-only by
+construction, with the decision already made that an AI suggestion
+**pre-fills** a settings form and never auto-applies.
+

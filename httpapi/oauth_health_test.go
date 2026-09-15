@@ -193,7 +193,7 @@ func TestAdminOAuthHealthRouteIsGatedByRequireAdmin(t *testing.T) {
 		t.Fatalf("login (regular user): %v", err)
 	}
 
-	router := NewRouter(engine, nil, config.Config{})
+	router := NewRouter(Deps{Engine: engine, Config: config.Config{}})
 	const path = "/v1/admin/oauth/health"
 
 	call := func(token string) *httptest.ResponseRecorder {

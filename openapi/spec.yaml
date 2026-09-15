@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: CrydenSync API
-  version: "1.1"
+  version: "1.3"
   description: >
     A self-hosted HTTP wrapper around the CrydenSync auth engine.
     Every response follows one of two envelope shapes: {"data": ...}
@@ -14,6 +14,19 @@ info:
      already returned keep their names and types, so a client reading
      only those is unaffected; a client that validates the object
      against an exhaustive schema is not.
+
+    1.2 is additive: API key management (POST/GET /api-keys and
+    DELETE /api-keys/{keyID}) plus GET /admin/security/hash-migration.
+    No existing path, field or status code changed.
+
+    1.3 is additive: per-user metadata for JWT claim mapping
+    (GET/PUT/DELETE /admin/users/{userID}/metadata), the webhook
+    delivery log (GET /admin/webhooks/deliveries) and the
+    shipped-events log (GET /admin/logging/recent). Every one is admin
+    only. No existing path, field or status code changed — but note
+    that PUT and DELETE /admin/users/{userID}/metadata/{key} are this
+    API's first endpoints that change what a subsequent token for
+    another user will contain. See that path's description.
 servers:
   - url: http://localhost:8080/v1
     description: Local dev
@@ -101,6 +114,221 @@ components:
           properties:
             code: { type: string }
             message: { type: string }
+
+    APIKey:
+      type: object
+      description: >
+        A machine-to-machine credential belonging to one user. Note what
+        is absent: no field here can reproduce the key itself. The raw
+        value is returned exactly once, by POST /api-keys, and only its
+        SHA-256 hash is stored.
+      properties:
+        # Quoted because the description contains braces: inside a flow
+        # mapping `{...}` an unquoted `{keyID}` opens a nested mapping and
+        # the document stops parsing. Fixed while adding 1.3 — the file had
+        # never been through a parser.
+        id: { type: string, format: uuid, description: 'What DELETE /api-keys/{keyID} takes.' }
+        name: { type: string, description: Host-supplied label; not required to be unique or non-empty. }
+        prefix:
+          type: string
+          description: >
+            The leading, non-secret fragment of the raw key
+            ("ck_a1b2c3d4"), stored in the clear so a UI can say which
+            key is which without holding the key. Not a lookup key.
+        scopes:
+          type: array
+          items: { type: string }
+          description: >
+            Host-defined permission strings, stored and returned
+            verbatim — the engine never interprets one. Always an array,
+            never null, so a client can iterate without a nil check. No
+            endpoint in this API enforces them yet.
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Null for a key that never expires, which is the default.
+        expired:
+          type: boolean
+          description: >
+            The server's own answer to "is this still usable" — the same
+            comparison made when the key is used, so the two can never
+            disagree. Sent rather than left for a client to derive from
+            expires_at.
+        created_at: { type: string, format: date-time }
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >
+            Null until the key is first used. Written at most once every
+            five minutes, so it answers "is anything still using this?"
+            rather than "when exactly was the last request".
+
+    HashMigration:
+      type: object
+      description: >
+        How far a password-hash migration has got, counted from the
+        engine's own audit events against the user total. Read-only.
+      properties:
+        hasher:
+          type: object
+          description: >
+            What this deployment is configured to WRITE — read from
+            config, never from the users table. The engine exposes no
+            bulk way to inspect stored hash algorithms.
+          properties:
+            algorithm: { type: string, enum: [bcrypt, argon2id] }
+            memory_kib: { type: integer, description: Omitted entirely for bcrypt. }
+            iterations: { type: integer, description: Omitted entirely for bcrypt. }
+            parallelism: { type: integer, description: Omitted entirely for bcrypt. }
+        total_users: { type: integer }
+        upgraded_events:
+          type: integer
+          description: >
+            Counts EVENTS, not users. A user whose hash is rewritten
+            twice — a second cost increase a year later — contributes
+            two, so this number can exceed total_users.
+        estimated_remaining:
+          type: integer
+          description: >
+            total_users - upgraded_events, floored at zero. Estimated:
+            it is only a distinct-user count if every user upgraded
+            exactly once, which is the normal case and not a guarantee.
+        window_days: { type: integer, description: 1-365, default 7. }
+        upgraded_events_in_window:
+          type: integer
+          description: >
+            The field that answers "is this draining" — the all-time
+            count only ever rises, while a windowed one falls to zero as
+            the last stragglers log in.
+
+    UserMetadata:
+      type: object
+      description: >
+        Every metadata key set on one user, plus the names that may not
+        be used. The keys here are not merely stored: they are merged
+        into every access token issued for this user from now on, which
+        is what the console's claim-mapping screen is for. A change
+        therefore lands on the user's next login or refresh — the same
+        latency an operator grant has — and never retroactively over a
+        token already issued.
+      properties:
+        user_id: { type: string, format: uuid }
+        metadata:
+          type: object
+          additionalProperties: true
+          description: >
+            Key to value, values being arbitrary JSON preserved exactly
+            as written — an object stays an object, and an explicit null
+            is stored as null rather than being dropped. Always
+            present; an empty object means the user has no keys set.
+        reserved_claim_names:
+          type: array
+          items: { type: string }
+          description: >
+            The names a write will be refused for: the seven registered
+            JWT claims (iss, sub, aud, exp, nbf, iat, jti) and this
+            API's own "role". Sent so a client can grey these out
+            instead of letting an operator discover the rule by being
+            rejected. Read from the engine and this repo's own claim
+            set, so it stays true as either changes.
+
+    WebhookDelivery:
+      type: object
+      description: >
+        One attempt-series at one event. A row is written before any HTTP
+        request is made and is never deleted, so this is a record of what
+        this API decided to send, not a sample of what got through.
+      properties:
+        id: { type: integer, description: The delivery's own id, stable across retries. }
+        event_id:
+          type: string
+          description: >
+            The engine's idempotency key for this occurrence — the value
+            sent as X-Cryden-Event-Id, and the one a receiver should
+            deduplicate on. MAY BE EMPTY: the engine generates it with
+            crypto/rand and deliberately delivers without one rather
+            than dropping the event, which is exactly why the primary
+            key is `id` and not this.
+        event_type: { type: string, description: The audit event that fired, e.g. account_locked. }
+        user_id:
+          type: string
+          format: uuid
+          description: Absent for an event with no user attached.
+        ip:
+          type: string
+          description: >
+            Absent when the event carried none. This is the UNREDACTED
+            address from the delivery payload — the shipping redaction
+            that applies to the log sink does not apply here, because
+            this is the record of what was sent to the receiver.
+        payload:
+          type: object
+          description: >
+            The exact body that was (or will be) POSTed, returned as raw
+            JSON in the bytes stored at enqueue. Retries send these same
+            bytes, which is what lets this field answer "show me what we
+            sent" for a retry as well as a first attempt. The signature
+            is computed over exactly this.
+        status: { type: string, enum: [pending, in_flight, delivered, failed] }
+        attempts:
+          type: integer
+          description: >
+            Attempts STARTED. A row at 3 of the configured maximum tells
+            an operator the endpoint has been failing; a row that is
+            `failed` says how many tries it got.
+        response_code:
+          type: integer
+          description: >
+            Absent when no response arrived at all — a connection
+            failure or a timeout, which is a different problem from a
+            receiver answering 500 and one an operator fixes in a
+            different place. Anything outside 2xx is a failure,
+            including a redirect.
+        error:
+          type: string
+          description: The receiver's own words where it gave any; absent otherwise.
+        duration_ms: { type: integer }
+        created_at: { type: string, format: date-time, description: When the row was enqueued, which is when the triggering request happened. }
+        next_attempt_at: { type: string, format: date-time, description: When the worker may next claim this row. }
+        delivered_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Absent until a 2xx arrives. Never set on a `failed` row.
+
+    ShippedLogEvent:
+      type: object
+      description: >
+        One record as the shipping sink received it — the REDACTED,
+        FILTERED copy, not the full-detail line on stdout. The two differ
+        by design: stdout keeps the IP address that makes an incident
+        debuggable, and only the copy that leaves the process loses it.
+        Reading this response is reading what a hosted aggregator would
+        have been handed.
+      properties:
+        id: { type: integer }
+        level: { type: string, enum: [debug, info, warn, error] }
+        message: { type: string }
+        fields:
+          type: object
+          additionalProperties: { type: string }
+          description: >
+            The record's own key/value fields, already redacted —
+            "[redacted]" under the masking mode, or an HMAC digest under
+            the hashing one. Absent for a record logged with none.
+        sink:
+          type: string
+          description: Which sink wrote it, so a row in a table shared with a second sink stays attributable.
+        shipped_at:
+          type: string
+          format: date-time
+          description: >
+            When the sink wrote the record, which for a synchronous sink
+            is when the engine logged it. Nano-precision, because one
+            login emits many records and at second precision they would
+            tie and nothing downstream could order them.
 
   responses:
     BadRequest:
@@ -397,6 +625,167 @@ paths:
         '200': { description: Healthy }
         '503': { description: Database unreachable }
 
+  /api-keys:
+    post:
+      summary: Mint an API key for the authenticated user
+      description: >
+        Returns the raw key exactly once. Only its SHA-256 hash is
+        stored, so a caller that loses it must mint a new one — which
+        is what the `notice` field in the response says, and why a
+        client must render it. Scoped to the calling user by the engine
+        itself, from the verified token and never from the request.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, description: Label for the key; 100 characters or fewer. }
+                scopes:
+                  type: array
+                  items: { type: string }
+                  description: Host-defined permission strings, stored verbatim. The engine never interprets them.
+                expires_in_days:
+                  type: integer
+                  minimum: 0
+                  maximum: 3650
+                  default: 0
+                  description: >
+                    0 or absent means the key never expires. Bounded so
+                    that the conversion to a duration cannot overflow
+                    into a negative TTL and come back as a confusing
+                    invalid_api_key_ttl.
+      responses:
+        '201':
+          description: The key was created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      key: { type: string, description: The raw key. This is the only time it is ever returned. }
+                      notice: { type: string, description: Human-readable warning that the key cannot be retrieved later. }
+                      api_key: { $ref: '#/components/schemas/APIKey' }
+        '400':
+          description: >
+            bad_request for a malformed body, name over 100 characters,
+            or expires_in_days outside 0-3650; invalid_api_key_scope for
+            a scope that is empty or contains whitespace.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: api_keys_not_configured — the engine has no API key store on this deployment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+    get:
+      summary: List the authenticated user's API keys
+      description: >
+        Live keys only. Revoked keys are absent; expired-but-unrevoked
+        ones ARE included with "expired": true, because "it expired on
+        Tuesday" is the answer to why a pipeline broke. The raw key
+        never appears here or anywhere else.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: The calling user's keys
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/APIKey' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: api_keys_not_configured — the engine has no API key store on this deployment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api-keys/{keyID}:
+    delete:
+      summary: Revoke an API key
+      description: >
+        Irreversible — the reason a key gets revoked is that somebody
+        else may have it, so mint a new one rather than offering an
+        un-revoke. Ownership is enforced in the store statement, so a
+        key belonging to another account, a key that does not exist and
+        an already-revoked key all answer the same 404.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: keyID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      status: { type: string, example: api key revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: api_key_not_found, or api_keys_not_configured when the deployment has no API key store.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/security/hash-migration:
+    get:
+      summary: Progress of a password-hash migration
+      description: >
+        Admin only — an operator's token. Reports the engine's own
+        password_hash_upgraded audit events against the user total,
+        which is the only way to watch a bcrypt-to-Argon2id migration
+        drain: switching PASSWORD_HASHER rewrites one stored hash per
+        successful login, and there is no separate command to run.
+        Read-only by construction — it calls two count methods and
+        records nothing.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: window_days
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 365, default: 7 }
+          description: >
+            The reporting window. Out of range or non-numeric is a 400,
+            not a silent clamp — a caller asking for 5000 and getting
+            365 back has no way to tell that from a window that happens
+            to hold the same count.
+      responses:
+        '200':
+          description: The report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/HashMigration' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: not_configured — the router was built without the stores this report reads.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
   /admin/oauth/health:
     get:
       summary: Reachability of each OAuth provider this API knows about
@@ -425,3 +814,297 @@ paths:
                         items: { $ref: '#/components/schemas/OAuthProviderHealth' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/users/{userID}/metadata:
+    get:
+      summary: Every metadata key set on one user
+      description: >
+        Admin only. Per-user metadata is this API's own table, not an
+        engine feature — cryden's user record deliberately has no
+        metadata concept, on the grounds that extra per-user data is a
+        host decision. Its purpose here is JWT claim mapping: the keys
+        returned are merged into every access token issued for this user
+        from now on, alongside their operator role if they have one.
+        Read-only.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: userID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The user's keys and the names that may not be used
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/UserMetadata' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: >
+            not_found — no such user, or a userID that is not a UUID at
+            all. Both answer the same way on purpose: a malformed id
+            handed to Postgres is a driver error that would surface as a
+            500, and "no such user" is the honest description of both.
+            Also not_configured when the router was built without the
+            stores this reads.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/users/{userID}/metadata/{key}:
+    put:
+      summary: Set one metadata key on a user
+      description: >
+        Admin only. Sets a single key, creating it or replacing it — not
+        a whole-map replace, so two operators editing different fields of
+        the same user cannot overwrite each other's work. The user's next
+        issued token carries the new claim; tokens already issued do not
+        change, since nothing re-signs them.
+
+        A key is refused with 400 reserved_metadata_key if it names a
+        registered JWT claim (sub, iss, exp, ...) or this API's own
+        "role", and with 400 invalid_metadata_key if it does not match
+        ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$. Both are checked when the key is
+        saved rather than when a token is next issued, so a bad key fails
+        once, for the operator who typed it, instead of at every login
+        for the affected user. `reserved_claim_names` on GET lists the
+        first set.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: userID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
+          description: >
+            The claim name to set. Percent-encoded by the client as any
+            path segment is; a key containing a slash is decoded before
+            the rule above judges it, so it is rejected by the rule
+            rather than by URL parsing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value:
+                  description: >
+                    Any JSON value. The field must be present: an
+                    explicit null is a legitimate value to store, while
+                    an absent field is a client bug, and decoding into a
+                    generic value would collapse the two.
+      responses:
+        '200':
+          description: >
+            The user's whole set after the write, in the same shape GET
+            returns — so a save is also the refresh, and a client needs
+            one parser. Read back from storage rather than echoed, which
+            is what proves the value that landed is the value stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/UserMetadata' }
+        '400':
+          description: >
+            invalid_metadata_key, reserved_metadata_key, or a body with no
+            value field.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: not_found, or not_configured. See GET on this path.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    delete:
+      summary: Remove one metadata key from a user
+      description: >
+        Admin only. Removes a single key. The user's next issued token no
+        longer carries the claim; tokens already issued keep it until
+        they expire, and nothing revokes them — the same property a role
+        revoke has.
+
+        A key that is not set is a 404 rather than a bare 200, matching
+        DELETE /api-keys/{keyID} and DELETE /sessions/{id}: a console
+        that removed the wrong field should be told, not shown a success
+        it did not achieve.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: userID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The user's whole set after the removal.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/UserMetadata' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: >
+            metadata_key_not_found when the user has no such key;
+            not_found for an unknown or malformed userID; not_configured
+            when the stores are absent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/webhooks/deliveries:
+    get:
+      summary: The webhook delivery log, newest first
+      description: >
+        Admin only. Lists what this API enqueued for delivery and what
+        happened to each row. Deliveries are enqueued, never sent
+        inline: the engine calls the webhook sender synchronously on the
+        login request path, so this API writes a row and returns, and a
+        background worker makes the call. Failures are retried with
+        exponential backoff up to a configured maximum, then recorded as
+        `failed` and left readable — nothing is ever deleted.
+
+        Read-only by construction. There is deliberately no "retry this
+        delivery" endpoint: re-queuing a delivery has consequences for a
+        third party, and this surface reports rather than acts.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [pending, in_flight, delivered, failed] }
+          description: >
+            Restrict to one status. An unrecognized value is a 400
+            naming the four valid ones, not an empty list — which is
+            indistinguishable from "no deliveries", the one thing a
+            filter must never be confusable with. Absent means every
+            status.
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+          description: >
+            Out of range or non-numeric is a 400, not a silent clamp — a
+            caller asking for 100000 and getting 500 back cannot tell
+            that from a log holding 500 rows.
+      responses:
+        '200':
+          description: The matching rows, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      deliveries:
+                        type: array
+                        items: { $ref: '#/components/schemas/WebhookDelivery' }
+                      count: { type: integer }
+                      status:
+                        type: string
+                        description: The filter in force, absent when none was asked for.
+                      statuses:
+                        type: array
+                        items: { type: string }
+                        description: The four valid values, so a client need not hardcode them.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: >
+            not_configured — the router was built without a delivery log,
+            which is what an unset WEBHOOK_URL produces. A wiring fact,
+            not a server fault.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/logging/recent:
+    get:
+      summary: The shipped-events log, newest first
+      description: >
+        Admin only. Lists records as the cloud-logging sink received
+        them: redacted and level-filtered. This deployment ships no
+        vendor SDK, so "shipped" means recorded in this API's own table,
+        which is the same bytes a hosted aggregator would have been
+        handed — swapping in a real client later changes one line of
+        main.go and nothing here.
+
+        Read-only by construction, like the other admin endpoints. There
+        is deliberately no endpoint that writes a record, edits the level
+        threshold, or clears the log: changing what gets shipped is
+        configuration, and configuration changes go through the same
+        explicit, human-confirmed settings path every other one does.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: level
+          in: query
+          required: false
+          schema: { type: string, enum: [debug, info, warn, error] }
+          description: >
+            The minimum severity, and it means AT OR ABOVE — level=warn
+            returns warn and error, the same direction the shipping
+            filter reads the word. One word, one meaning, within one
+            feature. An unrecognized value is a 400 naming the four valid
+            ones rather than an empty list. Absent means everything.
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+      responses:
+        '200':
+          description: The matching records, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      events:
+                        type: array
+                        items: { $ref: '#/components/schemas/ShippedLogEvent' }
+                      count: { type: integer }
+                      level:
+                        type: string
+                        description: >
+                          The filter in force, in the caller's own word,
+                          absent when none was asked for. Present so a
+                          short list can be told apart from a quiet
+                          engine.
+                      levels:
+                        type: array
+                        items: { type: string }
+                        description: The four valid values, least severe first.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: >
+            not_configured — the router was built without a shipped-events
+            sink, which is what an unset CLOUD_LOGGING produces.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
