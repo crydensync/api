@@ -315,6 +315,25 @@ There is no vendor here: this repo ships no SDK, so "shipped" means "recorded in
 - An unknown `level` is a `400` naming the four valid values, not an empty list — which is indistinguishable from "the engine has been quiet".
 - The write is **synchronous**, on the goroutine that logged. That is a real cost and is not the shape a busy deployment wants; it is the shape this one can have, because an asynchronous sink needs a flush policy and a shutdown path, and this repo has no graceful shutdown anywhere yet. A buffer that is never flushed on exit is a log that silently drops its last records before a crash, which for a log is the failure that matters most. `LOG_LEVEL` (default `info`) is what keeps the volume sane in the meantime, since the engine's debug records never reach the sink.
 
+## Weekly digest
+
+Two endpoints, and only one of them depends on any configuration:
+
+```
+GET /v1/admin/digest?window_days=            # built now, records nothing
+GET /v1/admin/digest/history?limit=          # what the schedule recorded
+```
+
+`GET /v1/admin/digest` returns `cryden.DigestSince`'s report verbatim — the text is the engine's, and this repo does not reformat a report it does not own — alongside `since` and `until`, because a client should not have to parse English out of a digest to learn what it covers. `window_days` (1–365, default 7) is passed to the engine rather than implemented here; the seven-day default is what makes it a *weekly* digest. **Asking twice leaves no trace**: the endpoint records nothing, and if that ever stopped being true an operator could no longer tell what the schedule produced from what somebody happened to open.
+
+Setting `DIGEST_INTERVAL_HOURS` (168 is weekly) turns on the schedule: a background job calls the same report every N hours and writes the rendered result to the `digest_runs` table, which `GET /v1/admin/digest/history` lists newest first. Unset means no schedule — no goroutine runs, nothing is written, and the history endpoint answers `404 not_configured` rather than an empty list an operator would read as "nothing has ever happened".
+
+- **cryden has no scheduling concept.** `WeeklyDigest`/`DigestSince` build a report on demand and return a string; there is no run record and nothing that remembers a digest was ever generated. So the table, the job and the history endpoint are entirely this repo's own.
+- **The row is the report, not a recipe for one.** The rendered text is stored rather than the counts behind it, because a digest covers a window that has *ended*: re-running its query later would not reproduce it, since "the last seven days" is anchored to when it was built.
+- **The first run is one full interval after startup**, not at boot. A process that restarts more often than the interval elapses — a crashloop, a deploy pipeline, a laptop — would otherwise write one row per restart, and a history that grows with restarts rather than with time is not a history of anything.
+- A failed run is **logged and swallowed**. This runs in a goroutine with nobody to hand an error to, and a scheduler that stopped at the first database blip would silently stop producing digests for the rest of the process's life.
+- Nothing on the HTTP surface can create a digest run. Only the scheduler writes, and it is a process component rather than a request handler — the read-only rule the whole admin surface follows.
+
 ## Design notes
 
 - `CORS_ORIGINS` is required, no wildcard default — an API handling auth tokens should never allow every origin.

@@ -8,6 +8,7 @@ import (
 	"github.com/crydensync/cryden/v2/store"
 
 	"github.com/crydensync/api/config"
+	"github.com/crydensync/api/digest"
 	"github.com/crydensync/api/shiplog"
 	"github.com/crydensync/api/usermeta"
 	"github.com/crydensync/api/webhook"
@@ -59,6 +60,16 @@ type Deps struct {
 	// off, nothing writes rows, and an empty list would be a lie about a
 	// deployment that ships nothing.
 	Shipped shiplog.Store
+
+	// Digests backs GET /v1/admin/digest/history. Nil unless
+	// DIGEST_INTERVAL_HOURS asked for a schedule: the table is only ever
+	// written by the scheduler, so with no schedule there is no history to
+	// read, and the handler answers 404 rather than an empty list an
+	// operator would read as "nothing has ever happened".
+	//
+	// The on-demand GET /v1/admin/digest needs nothing from here — it
+	// reads the engine's audit history and records nothing.
+	Digests digest.Store
 }
 
 // NewRouter builds the full route table. Called once from main.go.
@@ -81,6 +92,7 @@ func NewRouter(d Deps) http.Handler {
 	metadata := &MetadataHandlers{Users: d.Users, Meta: d.Meta}
 	hooks := &WebhookHandlers{Store: d.Hooks}
 	logging := &LoggingHandlers{Store: d.Shipped}
+	digests := &DigestHandlers{Engine: engine, Store: d.Digests}
 
 	mux := http.NewServeMux()
 
@@ -207,6 +219,17 @@ func NewRouter(d Deps) http.Handler {
 	// to see it: cryden keeps no history of what it logged, so this table
 	// is the history.
 	mux.HandleFunc("GET /v1/admin/logging/recent", RequireAdmin(engine, logging.Recent))
+
+	// The weekly digest, and the history of the ones the schedule built.
+	//
+	// Two endpoints rather than one, because they answer different
+	// questions and only one of them can write. GET /v1/admin/digest
+	// reports on the window ending now and records nothing — asking twice
+	// leaves no trace. GET /v1/admin/digest/history reads what the
+	// scheduled job recorded, and nothing on this surface can create a
+	// row there. Both are read-only; see DigestHandlers.
+	mux.HandleFunc("GET /v1/admin/digest", RequireAdmin(engine, digests.Digest))
+	mux.HandleFunc("GET /v1/admin/digest/history", RequireAdmin(engine, digests.DigestHistory))
 
 	return mux
 }
