@@ -490,3 +490,191 @@ Next: Stage 2, once someone can run a build. The check-in the user
 asked for is the point at which this entry was written; Stage 1's code
 should be built, vetted, formatted and tested before Stage 2 starts on
 top of it.
+
+## 2026-09-15 — Tier 3, Stage 2 (metadata, webhooks, shipped events)
+
+All four commands were run on `feat/tier3-config-and-endpoints` before
+each commit, and all four were clean:
+
+```
+go build ./...            ok
+go vet ./...              ok
+gofmt -l .                (no output)
+go test -count=1 ./...    config 0.031s  httpapi 13.308s  shiplog 0.006s
+                          templates 0.008s  usermeta 0.008s  webhook 0.029s
+```
+
+The Stage 1 entry ended by saying Stage 2 should not start until
+someone could run a build. The toolchain here recovered, so it did.
+
+Four commits, one logical step each:
+
+- `d43a73d` — `usermeta/`, `migrations/009`, the three admin routes and
+  the claims-provider merge in `main.go`.
+- `b3292c9` — `webhook/` (store, sender, worker), `migrations/010`, the
+  deliveries endpoint, the `WEBHOOK_*` config and `.env.example` block.
+- `bd2c990` — `shiplog/` (store, logger), `migrations/011`, the logging
+  endpoint, and the `MultiLogger` composition in `main.go`.
+- `cfbf29f` — `README.md` and `openapi/spec.yaml` (1.3), then the three
+  docs files.
+
+### What was built, and the decisions worth re-reading
+
+- **A repo-owned store is an interface, a Postgres implementation and an
+  in-memory double, in one package.** `usermeta`, `webhook` and
+  `shiplog` each follow cryden's own `store/interfaces.go` +
+  `store/memory` + `store/postgres` split. That is what makes these
+  endpoints testable with no Postgres — which matters more than usual
+  here, because there is none in this sandbox.
+- **The webhook delivery row is the queue, not a channel.** cryden calls
+  `SendWebhook` synchronously on the login request path, so `SendWebhook`
+  writes one `pending` row and returns; the capacity-1 channel is only a
+  nudge, and a full channel drops the hint rather than blocking. A
+  channel would lose everything on restart, and "was that lockout
+  announced" is unanswerable for an event that vanished before a row
+  was written.
+- **The body is built once, at enqueue, and stored.** Retries resend
+  identical bytes, so the delivery log answers "what did we send" for a
+  retry as well as a first attempt, and the signature covers the same
+  bytes the log shows.
+- **`webhook_deliveries.id` is a `BIGSERIAL` surrogate, not the event
+  id.** The spec said `id UUID PK`. But `notify.WebhookEvent.ID` **may
+  be empty** — cryden generates it with `crypto/rand` and on generator
+  failure deliberately delivers without one — and a delivery log whose
+  primary key can be blank loses exactly the rows an operator most wants.
+  The engine's id is recorded beside it as `event_id`. This is a
+  deviation from the plan and is why it is written down.
+- **"Shipped" means recorded in this repo's own table.** There is no
+  vendor SDK here, so `shipped_log_events` holds the same bytes a hosted
+  aggregator would have received, which is what makes it a stand-in for
+  one rather than a second, different log beside it. Swapping in a real
+  client is a change to one line of `main.go`.
+- **The shipped-events sink writes synchronously, and that is a
+  deliberate ceiling.** An asynchronous sink needs a buffer, a flush
+  policy and a shutdown path, and this repo has no graceful shutdown
+  anywhere yet. A buffer that is never flushed on exit is a log that
+  silently drops its last records before a crash — for a log, the
+  failure that matters most. `LOG_LEVEL` (default `info`) is what keeps
+  the volume sane meanwhile.
+- **`level=` on the logging endpoint means "at or above".** The same
+  direction `logger.LevelFilter` reads the word, so one word means one
+  thing within one feature. The in-memory double filters **by name
+  against the same set the SQL passes**, so it is faithful by
+  construction even for out-of-range levels, where `Level.String()`
+  clamps.
+- **An unrecognized stored level name is filed at `LevelError`**, not
+  dropped. Failing a whole listing over one hand-written row would be a
+  log an operator cannot read because of a typo in a row they were
+  trying to inspect.
+- **`sink` is recorded even though only one value is written today** —
+  a row read out of a table shared with a second sink stays
+  attributable.
+- **Metadata key validation lives in `usermeta`, not `httpapi`.** The
+  reserved-claim rule is a data invariant, so it holds for any writer.
+  `reserved_claim_names` is reported by `GET` so a console can grey
+  those out rather than let an operator discover the rule by rejection.
+  Writes are per key, never a whole-map `PUT`, so two operators editing
+  different fields cannot lose each other's work.
+- **`PUT`'s body decodes `value` into a `json.RawMessage`, not an
+  `any`.** `{"value": null}` and a missing `value` are different things,
+  and decoding into `any` collapses both to nil.
+- **A malformed `userID` is a `404`, not a `500`.** Handed straight to
+  Postgres, `"not-a-uuid"` is a driver error — "invalid input syntax for
+  type uuid" — which `mapError` turns into a 500 an operator reads as a
+  bug in the API rather than as a stale bookmark.
+
+### Bugs found, and how
+
+Three real ones, none of which a type check would have caught:
+
+- **`WEBHOOK_MAX_ATTEMPTS` set without `WEBHOOK_URL` did not fail
+  startup.** The orphaned-setting check used `os.LookupEnv`, but the
+  config tests' own `loadForTest` uses `t.Setenv(name, "")` — which
+  *sets* the variable to empty — so six existing tests failed. The
+  package's documented convention is that empty counts as unset
+  everywhere, so the check became `os.Getenv(...) != ""`. Found by
+  running the suite, which is the only thing that would have.
+- **`openapi/spec.yaml` had never parsed as YAML.** `APIKey.id`'s
+  description — `What DELETE /api-keys/{keyID} takes.` — sat unquoted
+  inside a flow mapping, so the `{` opened a nested mapping and a parser
+  stops there. Nothing had ever run the file through one; it was caught
+  only because the 1.3 additions were validated. Fixed by quoting that
+  one scalar, with a comment saying why. It is a syntax fix, not a
+  contract change — no path, field or status code moved, so 1.3's
+  "additive only" note stands.
+- **`webhook.Sender` as a typed nil.** A nil `*webhook.Sender` assigned
+  to cryden's `notify.WebhookSender` field is non-nil to cryden and
+  would silently turn on `DefaultWebhookEvents` for a deployment with
+  `WEBHOOK_URL` unset. `main.go` assigns the field inside the `if
+  webhookStore != nil` block for exactly that reason, and the store is
+  declared as the interface rather than the concrete type. The same
+  class of trap `logger.NewMultiLogger` documents for untyped nils.
+
+Two test bugs, both found by a red test and both the test's fault:
+`TestWebhookDeliveriesFiltersByStatus` resolved rows with `ClaimDue`,
+which sweeps *every* due row, so its second row came back `in_flight`
+rather than `pending` — the test now resolves before seeding; and
+`TestParseLevelFilesAnUnknownNameAtTheMostSevereEnd` asserted that
+`"INFO"` and `"warning "` were unknown, when `logger.ParseLevel` is
+case-insensitive, trims, and accepts the `warning` alias. The premise
+was wrong, not the code.
+
+One naming collision, the same class as Stage 1's `Deliveries`:
+`shiplog.Logger` could not have both a `Log` method (the
+`logger.ContextLogger` interface dictates the name) and a `Log` field,
+so the field is `Errors`.
+
+### Verification: what this does NOT cover
+
+Said plainly, per `CODEX.md`, rather than implied by a green suite:
+
+- **There is no Postgres and no network in this sandbox.**
+  `migrations/009`, `010` and `011` have **never been applied to a real
+  database** — not once, in any environment. They are a copy of a
+  design, not a verified schema. Everything downstream of them is
+  tested through the in-memory doubles.
+- **The webhook worker's claim and backoff behaviour is not tested
+  against Postgres.** `ClaimDue`'s single `UPDATE … WHERE id IN (SELECT
+  … FOR UPDATE SKIP LOCKED)` statement has not been run. What is tested
+  is the worker's behaviour against `httptest` and `MemoryStore`.
+- **The in-memory double cannot reproduce two workers racing.** It is
+  one mutex, so it proves the worker handles a claimed row correctly and
+  proves nothing about contention. `SKIP LOCKED` is the reason raising
+  the worker count later is safe, and that reason is unverified here.
+- **`internal/smoketest` still has never been run** against a database,
+  unchanged from every previous tier's note.
+- **WebAuthn still needs a real browser authenticator, and Apple a live
+  round trip.** Unchanged.
+- **The `usermeta` claims path is tested for storage and for the merge,
+  but the "reaches a freshly issued token" assertion runs on cryden's
+  in-memory user store**, not on Postgres' `user_metadata` table.
+- **`shiplog`'s Postgres `List` has not been run against the JSONB
+  column it reads.** The `lib/pq` bytea trap (a `[]byte` param is sent
+  as bytea hex, which a JSONB column rejects, so params go as
+  `string(raw)`) is handled by reading rather than by a passing test —
+  the `Insert` path that would exercise it needs a database.
+
+Newly owed by this tier, alongside the three tables: **the graceful
+shutdown the Stage 1 entry already flagged.** The webhook worker takes a
+`context.Context` and gets `context.Background()`; the shipped-events
+sink writes synchronously precisely because there is nowhere to flush a
+buffer on exit. Both become cheap once shutdown exists and neither was
+smuggled in behind the other.
+
+### Noticed while working, not fixed
+
+- **`openapi/spec.yaml` still predates Tier 1** — unchanged from the
+  Tier 2 and Stage 1 notes. Stage 2 added only its own schemas, paths and
+  the 1.3 version bump; the gap is still there.
+- **`README.md`'s "Design notes" now carries the repo-wide read-only
+  rule as prose.** It is in `CLAUDE.md` as a rule; a reviewer reading
+  only the README previously had no way to know why there is no retry
+  button.
+- **The delivery log and the shipped-events log both answer `404
+  not_configured` when their store is nil**, which is a wiring fact. A
+  client cannot currently tell that apart from "the resource genuinely
+  does not exist" — the same shape every other unconfigured feature in
+  this API already uses, so it is consistent rather than new.
+
+Tier 3 is complete. Next is Tier 4, which stays read-only by
+construction with the pre-fill-never-auto-apply decision already made.
