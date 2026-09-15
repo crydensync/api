@@ -71,6 +71,28 @@ components:
             region: { type: string }
             country: { type: string }
 
+    OAuthProviderHealth:
+      type: object
+      description: One provider's row in GET /admin/oauth/health.
+      properties:
+        provider: { type: string, description: 'google, github, microsoft, discord, gitlab or apple' }
+        configured:
+          type: boolean
+          description: >
+            Whether this deployment has credentials for the provider. False
+            means it cannot log anyone in and no probe was made.
+        status:
+          type: string
+          enum: [ok, degraded, unreachable, not_configured]
+          description: >
+            ok — the authorize endpoint answered below 500 (a bare GET
+            legitimately gets a 4xx); degraded — it answered 5xx;
+            unreachable — no HTTP response at all; not_configured — no
+            credentials, so nothing was probed.
+        http_status: { type: integer, description: Omitted when no response was received. }
+        latency_ms: { type: integer, description: Omitted when no probe ran. }
+        error: { type: string, description: Transport error; present only for unreachable. }
+
     ErrorResponse:
       type: object
       properties:
@@ -374,3 +396,32 @@ paths:
       responses:
         '200': { description: Healthy }
         '503': { description: Database unreachable }
+
+  /admin/oauth/health:
+    get:
+      summary: Reachability of each OAuth provider this API knows about
+      description: >
+        Admin only — an operator's token. Per provider: whether it is
+        configured at all, and whether its authorize endpoint answers.
+        A probe is a bare GET with no OAuth parameters, so it can neither
+        start nor complete a login; providers left unconfigured are
+        reported without being probed. This is api-side logic, not an
+        engine feature: cryden knows whether a provider is configured,
+        not whether it is reachable.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: One row per provider, in a stable order
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      providers:
+                        type: array
+                        items: { $ref: '#/components/schemas/OAuthProviderHealth' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }

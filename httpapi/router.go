@@ -17,6 +17,7 @@ func NewRouter(engine *cryden.Engine, db *sql.DB, cfg config.Config) http.Handle
 	email := &EmailHandlers{Engine: engine}
 	health := &HealthHandler{DB: db}
 	oauth := &OAuthHandlers{Engine: engine, Config: cfg}
+	oauthHealth := NewOAuthHealthHandlers(oauth)
 	totp := &TOTPHandlers{Engine: engine}
 	passkeys := &PasskeyHandlers{Engine: engine}
 	magicLink := &MagicLinkHandlers{Engine: engine}
@@ -95,6 +96,13 @@ func NewRouter(engine *cryden.Engine, db *sql.DB, cfg config.Config) http.Handle
 	}))
 
 	mux.HandleFunc("POST /v1/recovery-codes/generate", RequireAuth(engine, recovery.Generate))
+
+	// Admin endpoints — the first in this repo, hence the note. Everything
+	// under /v1/admin goes through RequireAdmin (middleware.go), which
+	// needs the `role` claim an operator's token carries. OAuth provider
+	// health is this repo's own logic: cryden has no concept of a provider
+	// being reachable, only of whether it is configured.
+	mux.HandleFunc("GET /v1/admin/oauth/health", RequireAdmin(engine, oauthHealth.Health))
 
 	return mux
 }

@@ -66,6 +66,13 @@ type OAuthHandlers struct {
 	Config config.Config
 }
 
+// oauthProviderNames is every provider this repo can speak to, in the
+// order the admin health endpoint reports them. Deliberately adjacent to
+// provider() below: a new case there without a name here would leave that
+// provider out of the health report, which is the one way these two lists
+// can silently disagree.
+var oauthProviderNames = []string{"google", "github", "microsoft", "discord", "gitlab", "apple"}
+
 func (h *OAuthHandlers) provider(name string) (oauthProvider, bool) {
 	switch name {
 	case "google":
