@@ -38,7 +38,7 @@ still in-memory and single-process either way, the same caveat cryden's
 own default limiter carries.
 
 Response envelope, error codes, and the migration-copying convention
-are all established — see `README.md` and `CODEX.md`.
+are all established — see `README.md` and `CLAUDE.md`.
 
 ## Tier 0 — bump the engine to v2.5.0: DONE
 
@@ -64,7 +64,7 @@ anything else in this repo.
 ## Tier 0.5 — admin/operator authorization foundation: DONE
 
 Console operator status is a concept this repo owns entirely, not
-cryden — see `CODEX.md`'s ownership section for why.
+cryden — see `CLAUDE.md`'s ownership section for why.
 
 - `migrations/003_operators.up.sql` / `.down.sql` — a new `operators`
   table, `user_id` (references cryden's own `users.id`), `role` (plain
@@ -98,7 +98,7 @@ whichever Tier 4/5 endpoint lands first.
 
 ## Tier 1 — auth methods: DONE
 
-Built on `feat/tier1-auth-methods` (its own branch, per `CODEX.md`'s
+Built on `feat/tier1-auth-methods` (its own branch, per `CLAUDE.md`'s
 one-branch-per-tier rule), in this order:
 
 - `migrations/004`-`008` — cryden's `0003`-`0007` copied in, renumbered
