@@ -30,12 +30,15 @@ info:
 
     1.4 is additive: the weekly security digest and the history of the
     ones the schedule built (GET /admin/digest, GET
-    /admin/digest/history), plus the support-ticket assistant (GET
-    /admin/support/diagnose). All three admin only. None changes any
+    /admin/digest/history), the support-ticket assistant (GET
+    /admin/support/diagnose) and the config tuning advisor (GET
+    /admin/config-tuning). All four admin only. None changes any
     existing path, field or status code, and none can take an action —
     the digest endpoint records nothing at all, the diagnosis cannot
-    unlock the account it describes, and only a background job this API
-    runs writes the digest history.
+    unlock the account it describes, the tuning advisor answers GET and
+    nothing else and its suggestions pre-fill a settings field for a
+    human to save rather than being applied, and only a background job
+    this API runs writes the digest history.
 servers:
   - url: http://localhost:8080/v1
     description: Local dev
@@ -368,6 +371,37 @@ components:
             reading a past digest is the whole point of the history, and
             a list of windows with no reports in it would be an index to
             nothing.
+
+    TuningSuggestion:
+      type: object
+      description: >
+        One thing worth reconsidering, split into three parts rather than
+        a sentence. This API returns the structured form
+        (admin.BuildTuningReport) and not cryden's flattened
+        ConfigTuningReport text helper, because a console renders one
+        card per suggestion and a pre-rendered blob cannot be turned
+        back into cards. The three fields are the three things a console
+        needs: which knob, what the evidence says, and what might be
+        worth changing.
+      properties:
+        area:
+          type: string
+          description: >
+            Which knob this concerns — the field a console groups or
+            de-duplicates on. Stable strings, not localized text.
+        finding:
+          type: string
+          description: >
+            What the recent history shows, in terms of the settings
+            currently in force. A sentence meant to be read by a human,
+            not parsed.
+        suggestion:
+          type: string
+          description: >
+            What might be worth changing. Wording is deliberately
+            suggestive ("consider ..."), never imperative: nothing here
+            has been applied, and nothing that reads this response can
+            apply it either.
 
   responses:
     BadRequest:
@@ -1144,6 +1178,75 @@ paths:
           description: >
             not_configured — the router was built without a shipped-events
             sink, which is what an unset CLOUD_LOGGING produces.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/config-tuning:
+    get:
+      summary: Settings worth reconsidering, judged against recent history
+      description: >
+        Admin only. Summarises the recent audit history against the
+        settings THIS deployment is actually running and returns the
+        suggestions as a structured list — one object per knob, ready to
+        render as a card. Calls admin.BuildTuningReport directly rather
+        than the flattened cryden.ConfigTuningReport text helper: the
+        text is right for a CLI and wrong for a console, which cannot
+        turn a pre-rendered blob into one card per suggestion.
+
+        THERE IS NO WRITE PATH, and there is not going to be one. No
+        parameter here changes a setting and no counterpart endpoint
+        applies a suggestion. The recorded decision is pre-fill, never
+        auto-apply: a suggestion pre-fills the settings field it
+        concerns and a human still saves that change through the
+        ordinary settings path. The route accepts GET and nothing else,
+        and the report is built through an interface with no Record on
+        it, so producing one cannot even write an audit event.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: window_days
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 365, default: 30 }
+          description: >
+            How far back to judge. Default 30 — cryden's own tuning
+            window, deliberately wider than the digest's week, because a
+            config knob should be judged against a month of traffic
+            rather than whatever happened this week.
+      responses:
+        '200':
+          description: The suggestions and the counts they were computed from
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      since: { type: string, format: date-time }
+                      until: { type: string, format: date-time }
+                      window_days: { type: integer }
+                      counts:
+                        type: object
+                        additionalProperties: { type: integer }
+                        description: >
+                          The raw audit counts the suggestions were
+                          computed from, so a console can show the
+                          evidence rather than asking an operator to
+                          trust a sentence. Includes event types cryden
+                          does not define, if this deployment records
+                          any.
+                      suggestions:
+                        type: array
+                        items: { $ref: '#/components/schemas/TuningSuggestion' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: >
+            not_configured — the router was built without the audit
+            store, so there is no history to judge anything against.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
