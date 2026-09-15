@@ -14,6 +14,8 @@ Tier 1 is done — see the status note under Tier 1 and `PROGRESS.md`'s
 Tier 2 is done — see the status note under Tier 2 and `PROGRESS.md`'s
 2026-09-15 entry. No engine bump this tier, so there were no new cryden
 migrations to copy.
+Tier 3 is done, in two stages on `feat/tier3-config-and-endpoints` — see
+the status note under Tier 3 and `PROGRESS.md`'s 2026-09-15 entries.
 
 ---
 
@@ -214,6 +216,29 @@ Two details were decided rather than assumed, and are recorded in
 ---
 
 ## Tier 3 — config plus real endpoints
+
+> **Status: every sub-item below is built, in two stages on
+> `feat/tier3-config-and-endpoints`.** Stage 1: Argon2id, cloud-logger
+> and email-template config, API keys, hash-migration. Stage 2:
+> `user_metadata` with JWT claim mapping, webhooks with a delivery log
+> and background worker, cloud-logging shipped-events log. `go build`,
+> `go vet`, `gofmt -l` and `go test ./...` are all clean on this branch.
+> What is still owed, and said plainly rather than implied: the
+> migrations `009`–`011` have **never been applied to a real database**
+> (no Postgres in this sandbox), the webhook worker's claim and backoff
+> behaviour is tested against `httptest` and an in-memory double
+> **rather than against Postgres `FOR UPDATE SKIP LOCKED`**, the
+> in-memory double cannot reproduce two workers racing (one mutex), and
+> this repo still has **no graceful shutdown** — owed before the
+> shipped-events sink could move off the request goroutine. `PROGRESS.md`
+> has all of it.
+>
+> Two deliberate deviations from the spec below, both argued in
+> `PROGRESS.md`: `webhook_deliveries` uses a `BIGSERIAL` surrogate
+> primary key rather than the event id (which cryden may leave **empty**,
+> by design, when its `crypto/rand` generator fails), and the shipped
+> copy is recorded in this repo's own table rather than sent to a vendor,
+> because this repo ships no vendor SDK.
 
 - **Argon2id, cloud loggers, custom email templates**: config only.
   Custom email templates specifically need **no engine change at
