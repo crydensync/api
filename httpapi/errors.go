@@ -115,7 +115,22 @@ func mapError(err error) apiError {
 		return apiError{http.StatusBadRequest, "invalid_ceremony_token", "this passkey ceremony has expired — please start again"}
 	case errors.Is(err, auth.ErrPasswordBreached):
 		return apiError{http.StatusBadRequest, "password_breached", "this password has appeared in a known data breach and cannot be used"}
-	// The four "not configured" sentinels below mean this deployment has
+	// API key errors. ErrInvalidAPIKey is what a presented key fails with
+	// — unknown, revoked, expired, malformed, empty, all one error on
+	// purpose so a caller cannot probe which of the keys it holds are
+	// still live. No endpoint in this repo accepts an API key yet, so
+	// nothing returns it today; it is mapped here so the first one that
+	// does cannot ship without it, which is the entire reason mapError is
+	// a single site.
+	case errors.Is(err, auth.ErrInvalidAPIKey):
+		return apiError{http.StatusUnauthorized, "invalid_api_key", "this API key is invalid, revoked or expired"}
+	case errors.Is(err, auth.ErrAPIKeyNotFound):
+		return apiError{http.StatusNotFound, "api_key_not_found", "no such API key"}
+	case errors.Is(err, auth.ErrInvalidAPIKeyScope):
+		return apiError{http.StatusBadRequest, "invalid_api_key_scope", "a scope must be non-empty and contain no whitespace"}
+	case errors.Is(err, auth.ErrInvalidAPIKeyTTL):
+		return apiError{http.StatusBadRequest, "invalid_api_key_ttl", "expiry cannot be in the past"}
+	// The five "not configured" sentinels below mean this deployment has
 	// not enabled that feature, not that the caller did anything wrong.
 	// 404 rather than 500 so a client can hide the option instead of
 	// reporting a server fault, matching oauth_provider_not_configured.
@@ -127,6 +142,12 @@ func mapError(err error) apiError {
 		return apiError{http.StatusNotFound, "magic_link_not_configured", "magic-link login is not enabled on this deployment"}
 	case errors.Is(err, cryden.ErrRecoveryCodesNotConfigured):
 		return apiError{http.StatusNotFound, "recovery_codes_not_configured", "recovery codes are not enabled on this deployment"}
+	// main.go always wires the API key store, so this is not reachable on
+	// this repo's own deployments — it is mapped so an engine built
+	// without Config.APIKeys answers a real shape rather than a 500,
+	// which is what a test or an embedding host would otherwise get.
+	case errors.Is(err, cryden.ErrAPIKeysNotConfigured):
+		return apiError{http.StatusNotFound, "api_keys_not_configured", "API keys are not enabled on this deployment"}
 	default:
 		// Struct-typed errors (not plain sentinels) need errors.As,
 		// not errors.Is — ErrOAuthEmailConflict carries Email and
