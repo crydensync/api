@@ -62,6 +62,25 @@ type Config struct {
 	// JWT_SECRET.
 	EncryptionKey string
 
+	// SettingsEncryptionKey seals the credentials this repo stores for
+	// the AI-assisted admin features — an LLM provider's API key, a
+	// read-only database's password — at rest, in the settings table.
+	//
+	// Deliberately NOT EncryptionKey, and this is the one place in this
+	// repo where a second key is spent rather than reused. EncryptionKey
+	// is cryden's: the engine derives from it whatever it needs to read
+	// TOTP secrets, and this repo never sees those bytes. This key is
+	// this repo's own, and the two have different lifetimes and different
+	// blast radii — rotating one must not silently make the other's rows
+	// unreadable. Every other purpose-keyed secret here follows the same
+	// rule (see CLOUD_LOG_HASH_KEY).
+	//
+	// Empty means the AI settings endpoints answer 404 not_configured
+	// rather than the server refusing to start, the same shape
+	// ENCRYPTION_KEY itself uses for the second factors: a deployment
+	// that has never opened that screen should still run.
+	SettingsEncryptionKey string
+
 	// TOTPIssuerName is what the user's authenticator app shows next to
 	// the account. Cosmetic. Empty means cryden's own default ("Cryden").
 	TOTPIssuerName string
@@ -369,6 +388,12 @@ func Load() (Config, error) {
 			cfg.WebAuthnRPOrigins = append(cfg.WebAuthnRPOrigins, strings.TrimSpace(o))
 		}
 	}
+
+	// This repo's own key, for the credentials it stores itself in the
+	// settings table. Read here rather than defaulted from EncryptionKey
+	// above, on purpose — see the field comment for why the two are
+	// separate secrets with separate lifetimes.
+	cfg.SettingsEncryptionKey = os.Getenv("SETTINGS_ENCRYPTION_KEY")
 
 	// Anomaly detection and credential-stuffing detection — one switch,
 	// because they are one store. Both threshold sets begin as the
