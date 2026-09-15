@@ -5,17 +5,23 @@ import (
 	"net/http"
 
 	"github.com/crydensync/cryden/v2"
+	"github.com/crydensync/cryden/v2/store"
 
 	"github.com/crydensync/api/config"
 )
 
 // Deps is everything the route table needs to build its handlers. It is a
 // struct rather than a parameter list because the admin surface keeps
-// growing: every endpoint added under /v1/admin needs something the route
-// table does not have today, and a struct absorbs that without every
-// existing call site growing a positional argument. It also lets a test
-// build a router with exactly the dependencies the endpoint under test
-// needs and leave the rest nil.
+// growing: the hash-migration report alone needs stores the engine holds
+// unexported, so they can only come from whoever constructed them
+// (main.go). A struct also lets a test build a router with exactly the
+// dependencies the endpoint under test needs and leave the rest nil.
+//
+// Every store here is the SAME instance main.go handed to cryden. Building
+// a second one would be worse than wasteful — the hash-migration count and
+// the engine's own writes would be reading different objects, and a
+// repo-owned store the engine writes through would be invisible to the
+// endpoint that reports on it.
 type Deps struct {
 	Engine *cryden.Engine
 
@@ -24,6 +30,13 @@ type Deps struct {
 	// reports the database as unconfigured rather than panicking.
 	DB     *sql.DB
 	Config config.Config
+
+	// Audit and Users back GET /v1/admin/security/hash-migration — cryden
+	// exposes no bulk way to inspect stored password hashes, so the
+	// migration is measured from the audit events the engine already
+	// records against the user total.
+	Audit store.AuditStore
+	Users store.UserStore
 }
 
 // NewRouter builds the full route table. Called once from main.go.
@@ -42,6 +55,7 @@ func NewRouter(d Deps) http.Handler {
 	magicLink := &MagicLinkHandlers{Engine: engine}
 	recovery := &RecoveryHandlers{Engine: engine}
 	apiKeys := &APIKeyHandlers{Engine: engine}
+	security := &SecurityHandlers{Audit: d.Audit, Users: d.Users, Config: d.Config}
 
 	mux := http.NewServeMux()
 
@@ -130,12 +144,16 @@ func NewRouter(d Deps) http.Handler {
 		apiKeys.Revoke(w, r, r.PathValue("keyID"))
 	}))
 
-	// Admin endpoints — the first in this repo, hence the note. Everything
-	// under /v1/admin goes through RequireAdmin (middleware.go), which
-	// needs the `role` claim an operator's token carries. OAuth provider
-	// health is this repo's own logic: cryden has no concept of a provider
-	// being reachable, only of whether it is configured.
+	// Admin endpoints. Everything under /v1/admin goes through RequireAdmin
+	// (middleware.go), which needs the `role` claim an operator's token
+	// carries. OAuth provider health and the hash-migration report are both
+	// this repo's own logic — cryden has no concept of a provider being
+	// reachable, and no bulk way to read stored hash algorithms.
+	//
+	// Every endpoint here is read-only, and has to stay that way: see
+	// CLAUDE.md's hard rule about the admin surface.
 	mux.HandleFunc("GET /v1/admin/oauth/health", RequireAdmin(engine, oauthHealth.Health))
+	mux.HandleFunc("GET /v1/admin/security/hash-migration", RequireAdmin(engine, security.HashMigration))
 
 	return mux
 }

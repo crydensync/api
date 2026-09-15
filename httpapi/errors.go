@@ -42,6 +42,13 @@ var errNotOperator = errors.New("this account does not have console operator acc
 // code to the client; the distinction only matters server-side.
 var errEdgeRateLimited = errors.New("too many requests")
 
+// errAdminStoresUnavailable is returned by an admin handler whose backing
+// stores were never wired — see httpapi.Deps, whose store fields a test
+// may legitimately leave nil. That is a wiring fact and not a server
+// fault, so it answers 404 like every other unconfigured feature in this
+// API rather than a 500 an operator would read as a bug.
+var errAdminStoresUnavailable = errors.New("this report requires stores that are not configured on this deployment")
+
 // The following three are local, API-layer-only errors from the
 // OAuth redirect/callback flow itself — never returned by the engine,
 // which never touches HTTP or a specific provider.
@@ -60,6 +67,8 @@ func mapError(err error) apiError {
 		return apiError{http.StatusForbidden, "not_operator", "this account does not have console operator access"}
 	case errors.Is(err, errEdgeRateLimited):
 		return apiError{http.StatusTooManyRequests, "rate_limited", "too many requests, please slow down"}
+	case errors.Is(err, errAdminStoresUnavailable):
+		return apiError{http.StatusNotFound, "not_configured", "this report is not available on this deployment"}
 	case errors.Is(err, errOAuthProviderNotConfigured):
 		return apiError{http.StatusNotFound, "oauth_provider_not_configured", "this OAuth provider is not configured on this deployment"}
 	case errors.Is(err, errOAuthStateMismatch):
