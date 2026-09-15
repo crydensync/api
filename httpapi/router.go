@@ -93,6 +93,7 @@ func NewRouter(d Deps) http.Handler {
 	hooks := &WebhookHandlers{Store: d.Hooks}
 	logging := &LoggingHandlers{Store: d.Shipped}
 	digests := &DigestHandlers{Engine: engine, Store: d.Digests}
+	support := &SupportHandlers{Engine: engine}
 
 	mux := http.NewServeMux()
 
@@ -230,6 +231,13 @@ func NewRouter(d Deps) http.Handler {
 	// row there. Both are read-only; see DigestHandlers.
 	mux.HandleFunc("GET /v1/admin/digest", RequireAdmin(engine, digests.Digest))
 	mux.HandleFunc("GET /v1/admin/digest/history", RequireAdmin(engine, digests.DigestHistory))
+
+	// The support-ticket assistant: "why can't this person log in",
+	// answered from the account's own recorded history. Read-only by
+	// construction — cryden builds it through interfaces carrying no way
+	// to clear a lockout or reset a counter, so it cannot fix the account
+	// it is describing. See SupportHandlers.
+	mux.HandleFunc("GET /v1/admin/support/diagnose", RequireAdmin(engine, support.Diagnose))
 
 	return mux
 }

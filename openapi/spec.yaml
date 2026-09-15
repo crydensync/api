@@ -30,10 +30,12 @@ info:
 
     1.4 is additive: the weekly security digest and the history of the
     ones the schedule built (GET /admin/digest, GET
-    /admin/digest/history). Both admin only. Neither changes any
-    existing path, field or status code, and neither can take an
-    action — the digest endpoint records nothing at all, and only a
-    background job this API runs writes the history.
+    /admin/digest/history), plus the support-ticket assistant (GET
+    /admin/support/diagnose). All three admin only. None changes any
+    existing path, field or status code, and none can take an action —
+    the digest endpoint records nothing at all, the diagnosis cannot
+    unlock the account it describes, and only a background job this API
+    runs writes the digest history.
 servers:
   - url: http://localhost:8080/v1
     description: Local dev
@@ -1145,6 +1147,62 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/support/diagnose:
+    get:
+      summary: Why one account cannot log in
+      description: >
+        Admin only. Answers the support ticket "why can't this person
+        log in" from the account's own recorded history: whether it is
+        locked and until when, its consecutive failed-attempt count, how
+        many sessions it holds right now, and the recent failure-type
+        events behind all of that, newest first.
+
+        Read-only structurally, not by convention: the report is built
+        through interfaces carrying no LockAccount, ResetFailedAttempts
+        or Revoke, so this cannot unlock the very account it is
+        describing.
+
+        An address with no account is NOT an error — it is the answer,
+        and the text says so. A 404 would be indistinguishable from a
+        broken endpoint, and "you have the wrong address" is exactly what
+        an agent pasting a typo needs to be told.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: email
+          in: query
+          required: true
+          schema: { type: string, format: email }
+          description: >
+            The account to diagnose. Required: absent or blank is a 400
+            rather than a diagnosis of the empty string, which would come
+            back as "no account exists" — an answer to a question nobody
+            asked.
+      responses:
+        '200':
+          description: The diagnosis, as plain text
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      email:
+                        type: string
+                        description: >
+                          Echoed back, so an agent working through a queue
+                          can see which address was answered.
+                      text:
+                        type: string
+                        description: >
+                          The engine's rendered report, byte for byte.
+                          Multi-line plain text, meant to be read as it
+                          is.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
 
   /admin/digest:
     get:

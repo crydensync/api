@@ -235,6 +235,17 @@ Set `PASSWORD_HASHER=argon2id` and every login whose stored hash is out of date 
 - `estimated_remaining` is therefore *estimated*, floored at zero, and is `total_users - upgraded_events`.
 - `upgraded_events_in_window` is the field that actually answers "is this draining": the all-time count only ever rises, while a windowed one falls to zero as the last stragglers log in. `window_days` (1–365, default 7) sets that window.
 
+`GET /v1/admin/support/diagnose?email=` answers the support ticket "why can't this person log in", from the account's own recorded history: whether it is locked and until when, its consecutive failed-attempt count, how many sessions it currently holds, and the recent failure-type events behind all of that, newest first.
+
+```json
+{"data": {"email": "dana@example.com", "text": "Login diagnosis for dana@example.com\n\nAccount is LOCKED until 14:32 UTC.\n5 consecutive failed attempts currently recorded…"}}
+```
+
+- **An unknown address is the answer, not a 404.** cryden's `admin.DiagnoseLogin` returns `Found: false` rather than an error, and the report says "No account exists for this email address." A 404 would be indistinguishable from a broken endpoint, and "you have the wrong address" is exactly what a support agent pasting a typo'd email needs to be told.
+- The text is the engine's, passed through verbatim. This repo does not reformat a report it does not own — and `email` is echoed alongside it so an agent working through a queue can see which address was answered.
+- **Read-only structurally, not by convention.** The report is built through interfaces carrying no `LockAccount`, `ResetFailedAttempts` or `Revoke`, so the endpoint cannot unlock the very account it is describing, whatever the caller asks for. That is cryden's design and this repo adds nothing on top of it.
+- A missing `email` is a `400`, not a diagnosis of the empty string — which would come back as "no account exists", an answer to a question nobody asked.
+
 ## API keys
 
 `POST /v1/api-keys` mints a machine-to-machine credential for the calling user and returns the raw key **once** — cryden stores only its SHA-256 hash and can never reproduce it, so a caller that loses it has to mint a new one. The response carries the raw key, the stored record (`id`, `name`, `prefix`, `scopes`, `expires_at`, `expired`, `created_at`, `last_used_at`) and a `notice` saying so; a client that renders the key without that notice is the failure this guards against.
