@@ -233,6 +233,17 @@ type Config struct {
 	// that retries forever is a load generator pointed at a third party —
 	// and the row stays readable afterwards either way.
 	WebhookMaxAttempts int
+
+	// DigestInterval is how often the background job builds a digest and
+	// records it in digest_runs, which is what
+	// GET /v1/admin/digest/history reads back. Zero — the default — runs no
+	// job at all.
+	//
+	// Opt-in rather than "weekly by default", for the reason webhooks and
+	// cloud logging are: a deployment that has not asked for scheduled
+	// digests should not have a goroutine quietly accumulating rows. The
+	// on-demand GET /v1/admin/digest works either way, and writes nothing.
+	DigestInterval time.Duration
 }
 
 // PasswordHasher values. Bcrypt is the engine's own default and what an
@@ -524,6 +535,19 @@ func Load() (Config, error) {
 				strings.Join(orphaned, ", "))
 		}
 	}
+
+	// Scheduled digests. Unset or 0 is off (see the field comment); a
+	// negative is refused rather than read as "off", because it can only
+	// be a typo and silently treating a typo as the default is how a
+	// setting an operator meant to change does nothing at all.
+	digestHours, err := envInt("DIGEST_INTERVAL_HOURS", 0)
+	if err != nil {
+		return cfg, err
+	}
+	if digestHours < 0 {
+		return cfg, fmt.Errorf("DIGEST_INTERVAL_HOURS cannot be negative — leave it unset to switch scheduled digests off, got %d", digestHours)
+	}
+	cfg.DigestInterval = time.Duration(digestHours) * time.Hour
 
 	return cfg, nil
 }
