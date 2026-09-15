@@ -94,6 +94,7 @@ func NewRouter(d Deps) http.Handler {
 	logging := &LoggingHandlers{Store: d.Shipped}
 	digests := &DigestHandlers{Engine: engine, Store: d.Digests}
 	support := &SupportHandlers{Engine: engine}
+	tuning := &TuningHandlers{Audit: d.Audit, Config: d.Config}
 
 	mux := http.NewServeMux()
 
@@ -238,6 +239,13 @@ func NewRouter(d Deps) http.Handler {
 	// to clear a lockout or reset a counter, so it cannot fix the account
 	// it is describing. See SupportHandlers.
 	mux.HandleFunc("GET /v1/admin/support/diagnose", RequireAdmin(engine, support.Diagnose))
+
+	// The config tuning advisor. Suggestions only: there is no endpoint
+	// that applies one, and no parameter that changes a setting — the
+	// recorded decision is that a suggestion pre-fills the settings field
+	// it concerns and a human saves that change through the ordinary
+	// settings path. See TuningHandlers and CLAUDE.md's hard rule.
+	mux.HandleFunc("GET /v1/admin/config-tuning", RequireAdmin(engine, tuning.ConfigTuning))
 
 	return mux
 }

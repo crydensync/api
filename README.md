@@ -326,6 +326,31 @@ There is no vendor here: this repo ships no SDK, so "shipped" means "recorded in
 - An unknown `level` is a `400` naming the four valid values, not an empty list — which is indistinguishable from "the engine has been quiet".
 - The write is **synchronous**, on the goroutine that logged. That is a real cost and is not the shape a busy deployment wants; it is the shape this one can have, because an asynchronous sink needs a flush policy and a shutdown path, and this repo has no graceful shutdown anywhere yet. A buffer that is never flushed on exit is a log that silently drops its last records before a crash, which for a log is the failure that matters most. `LOG_LEVEL` (default `info`) is what keeps the volume sane in the meantime, since the engine's debug records never reach the sink.
 
+## Config tuning advisor
+
+`GET /v1/admin/config-tuning?window_days=` reads the recent audit history, compares it against the settings **actually in force**, and returns the suggestions as a structured list — one object per knob, ready to render as a card:
+
+```json
+{"data": {
+  "since": "…", "until": "…", "window_days": 30,
+  "counts": {"account_locked": 5, "login_failed": 5},
+  "suggestions": [{
+    "area": "Lockout",
+    "finding": "5 accounts were locked out of 5 recorded in this window (100%) — LockoutThreshold is currently 5, LockoutDuration 15m0s.",
+    "suggestion": "If most of these are real users mistyping a password rather than an attack, consider raising LockoutThreshold…"
+  }]
+}}
+```
+
+- **There is no write path, and there is not going to be one.** No parameter changes a setting, and no counterpart endpoint applies a suggestion. The decision recorded for this surface is **pre-fill, never auto-apply**: a suggestion pre-fills the settings field it concerns, and a human still saves that change through the ordinary settings path. An endpoint that wrote a suggested value straight into live config would be the violation `CLAUDE.md`'s hard rule names, and would let a bad suggestion change production with no confirmation. The route accepts `GET` and nothing else.
+- It calls `admin.BuildTuningReport` **directly**, not the flattened `cryden.ConfigTuningReport` text helper. The text is right for a CLI and wrong for a console: a pre-rendered blob cannot become one card per suggestion, and a client would be back to parsing English to find which knob a paragraph was about.
+- `counts` is the raw audit evidence the suggestions were computed from, including event types cryden does not define — so a console can show the numbers rather than asking an operator to trust a sentence.
+- Every value in the report comes from the config this process built the engine from, never a second reading of the environment. `UsingDefaultRateLimiter` is derived from `RedisURL` being empty — the same condition `main.go` uses to build the Redis limiter — so the report and the wiring cannot drift.
+- `window_days` (1–365) defaults to cryden's own **30**-day tuning window, deliberately wider than the digest's week: a config knob should be judged against a month of traffic, not whatever happened this week.
+- The password-strength finding always says the breach checker is not set. That is **accurate rather than a stub**: this repo has never wired `Config.BreachedPasswordChecker`, because cryden ships no implementation and every real one calls somebody else's corpus.
+
+`LOCKOUT_THRESHOLD` and `LOCKOUT_DURATION_MINUTES` (defaults 5 and 15 minutes) are passed through to the engine explicitly, for the two reasons above at once: cryden reads them straight off its config with no defaulting, so a deployment that left them implicit was running a lockout that could never actually trigger; and the tuning report describes the settings in force, so it should not have to guess what the engine was handed.
+
 ## Weekly digest
 
 Two endpoints, and only one of them depends on any configuration:

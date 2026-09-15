@@ -116,6 +116,22 @@ type Config struct {
 	RateLimitAttempts int
 	RateLimitWindow   time.Duration
 
+	// LockoutThreshold and LockoutDuration are the engine's account
+	// lockout bounds: after LockoutThreshold consecutive failed attempts the
+	// account is locked for LockoutDuration. Defaults are cryden's own (5
+	// and 15 minutes), restated here for the same reason the rate-limit
+	// bounds are — and with a sharper edge, because the engine does not
+	// fill these in either way. A zero threshold locks an account on its
+	// very first failed password; a zero duration locks it until an instant
+	// already past, which is to say not at all.
+	//
+	// They are also what GET /v1/admin/config-tuning describes when it says
+	// a lockout setting is in force. Passed through to the engine rather
+	// than left implicit, so the report and the engine cannot disagree
+	// about what this deployment is actually running.
+	LockoutThreshold int
+	LockoutDuration  time.Duration
+
 	// PasswordHasher selects which algorithm NEW password hashes are
 	// written with — PasswordHasherBcrypt (the engine's default) or
 	// PasswordHasherArgon2id. Switching is safe at any time and needs no
@@ -406,6 +422,22 @@ func Load() (Config, error) {
 		return cfg, err
 	}
 	if cfg.RateLimitWindow, err = envSeconds("RATE_LIMIT_WINDOW_SECONDS", time.Minute); err != nil {
+		return cfg, err
+	}
+
+	// Account lockout. Defaulted rather than left at zero — see the field
+	// comments: a zero threshold would lock every account on its first
+	// failed password, which is the opposite of a default. A threshold
+	// below 1 is refused for the same reason rather than read as "off":
+	// cryden has no way to switch lockout off, so a 0 here can only be a
+	// typo, and honouring it would lock every account on one bad password.
+	if cfg.LockoutThreshold, err = envInt("LOCKOUT_THRESHOLD", 5); err != nil {
+		return cfg, err
+	}
+	if cfg.LockoutThreshold < 1 {
+		return cfg, fmt.Errorf("LOCKOUT_THRESHOLD must be at least 1, got %d — cryden has no way to switch account lockout off", cfg.LockoutThreshold)
+	}
+	if cfg.LockoutDuration, err = envMinutes("LOCKOUT_DURATION_MINUTES", 15*time.Minute); err != nil {
 		return cfg, err
 	}
 
