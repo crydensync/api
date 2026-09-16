@@ -40,18 +40,20 @@ info:
     human to save rather than being applied, and only a background job
     this API runs writes the digest history.
 
-    1.5 is additive, and is the first version with admin endpoints that
-    WRITE: the AI provider settings (GET/PUT/DELETE
+    1.5 is additive: the AI provider settings (GET/PUT/DELETE
     /admin/settings/llm-provider, /admin/settings/database-provider and
     /admin/settings/ask-ai-widget). No existing path, field or status
-    code changed. The writes are the "human saves it" half of the
-    pre-fill rule 1.4 describes — a tuning suggestion pre-fills one of
-    these forms and an operator saves it — and they are the only place
-    a credential is stored. PUT database-provider additionally verifies
-    against the database itself that the supplied role cannot write,
-    and refuses to store the connection until the server has rejected
-    one; see that path's description for why the check is done there
-    and not in the console.
+    code changed, and 1.5 adds no new kind of thing — 1.3's metadata
+    PUT/DELETE already wrote, so the admin surface was not read-only
+    before this version and this version does not change that. The
+    writes here are the "human saves it" half of the pre-fill rule 1.4
+    describes — a tuning suggestion pre-fills one of these forms and an
+    operator saves it — and they are the only place a credential is
+    stored. PUT database-provider additionally verifies against the
+    database itself that the supplied role cannot write, and refuses to
+    store the connection until the server has rejected one; see that
+    path's description for why the check is done there and not in the
+    console.
 
     1.5 is also the first version whose responses depend on a
     deployment setting that is not a cryden one: all three paths answer
