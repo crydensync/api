@@ -15,12 +15,18 @@ has its own `httpapi/apple.go` — see `NEXT.md` Tier 1).
 Tier 2 added one admin endpoint on top of those, the first in this repo
 — see below. Tier 3 added three more admin endpoints and this repo's
 first three tables of its own, plus the config that lights up Argon2id,
-cloud logging and email templates — see below. Tier 4's Stage 1 added
-three more admin endpoints and this repo's fourth table — the weekly
+cloud logging and email templates — see below. Tier 4 added six more
+admin endpoints and two more tables of its own: Stage 1 is the weekly
 digest and its recorded history, the support-ticket login diagnosis and
-the config tuning advisor. Every admin endpoint in this repo is either
-read-only or an explicit operator action on a named key; nothing on that
-surface applies a suggestion by itself.
+the config tuning advisor; Stage 2 is the AI provider settings — the LLM
+provider, the read-only database and the ask-ai widget config. Tier 4 is
+also where this repo stopped being purely a wrapper: it now ships a live
+`ai.LLMProvider` over the Anthropic SDK and a live `ai.QueryableStore`
+over a second database connection, neither of which is wired to a
+consumer yet. Every admin endpoint here is read-only except the
+`/v1/admin/settings/*` saves, which are the human half of the
+pre-fill-never-auto-apply rule — nothing on that surface applies a
+suggestion by itself.
 
 Tier 1 also added the second-factor surface: TOTP enroll/confirm/
 disable, passkey registration/list/delete, magic-link request/complete,
@@ -308,15 +314,19 @@ in-memory double, not against Postgres `FOR UPDATE SKIP LOCKED`, and
 that double cannot reproduce two workers racing. `PROGRESS.md` says all
 of this plainly.
 
-## Tier 4 — AI-assisted admin endpoints (Stage 1): DONE
+## Tier 4 — AI-assisted admin endpoints: DONE
 
 Built in two stages on `feat/tier4-ai-admin-endpoints`, for the same
 reason Tier 3 was: the three read-only reports below had their decisions
-already made in `NEXT.md`, while Stage 2 needs two decisions that are
-not a build session's to make (see the end of this section). `go build`,
-`go vet`, `gofmt -l` and `go test ./...` are clean, `httpapi` is also
-green under `-race`, and `PROGRESS.md` records what that does and does
-not cover.
+already made in `NEXT.md`, while Stage 2 needed two decisions that are
+not a build session's to make. Those two were resolved by following
+`NEXT.md`'s own instruction to make the reasonable call and record it —
+see Stage 2 below. `go build`, `go vet`, `gofmt -l` and `go test ./...`
+are clean, `httpapi` and the two new packages are also green under
+`-race`, and `PROGRESS.md` records what that does and does not cover,
+which is a lot.
+
+### Stage 1 — the three read-only reports
 
 Everything here is `RequireAdmin`, read-only, and buildable on the
 engine alone — no LLM, no second database connection, no outbound call:
@@ -373,19 +383,89 @@ sandbox — and the digest schedule is a goroutine on
 `context.Background()`, because this repo still has no graceful
 shutdown. `PROGRESS.md` says both plainly.
 
-## Tier 4 Stage 2, and Tier 5
+### Stage 2 — the providers and the widget config
+
+This is the half of the tier that needed an LLM, a second database
+connection and an outbound call, so it is the half where this repo
+stopped being purely a wrapper. Three settings endpoints, all
+`RequireAdmin`, all in `httpapi/settings_handlers.go`, backed by
+`settings/` and `migrations/013_settings`:
+
+- **`GET`/`PUT`/`DELETE /v1/admin/settings/llm-provider`** stores which
+  model and key back `ai.LLMProvider`. `DELETE` was added alongside the
+  specced pair: a settings screen with no way to clear a credential is
+  a screen an operator cannot leave.
+- **`GET`/`PUT`/`DELETE /v1/admin/settings/database-provider`** stores
+  the connection `ai.QueryableStore` runs against.
+- **`GET`/`PUT`/`DELETE /v1/admin/settings/ask-ai-widget`** stores the
+  widget's enabled flag, allowed origins, entity scope and copy.
+
+Both credentials are sealed with **AES-256-GCM before they reach the
+table**, keyed from a new `SETTINGS_ENCRYPTION_KEY`. That key is
+deliberately *not* cryden's `ENCRYPTION_KEY`: the two seal different
+things with different lifetimes and blast radii, and this repo already
+sets the precedent with `CLOUD_LOG_HASH_KEY`. An unset key is not a
+startup failure — the three endpoints answer `404 not_configured`, like
+every other optional feature here. The encryption itself is cryden's
+`security.NewAESGCMEncryptor` rather than a second implementation of the
+same primitive; see `settings/secrets.go`.
+
+Three things in this stage are worth reading before touching them:
+
+- **`PUT /database-provider` proves the role cannot write, then stores.**
+  Order is the whole design: validate the shape, connect with the
+  supplied credentials and attempt a write, and only store once the
+  server refuses. The probe targets `pg_temp`, so a failed probe leaves
+  nothing behind, and the pool is pinned to one connection so the
+  `CREATE` and the `INSERT` share the session owning that temp table.
+  Three outcomes are distinguished — refused is a pass, succeeded is
+  `400 database_role_not_read_only`, anything else is
+  `400 database_role_unverified` and **is not a pass**. Only SQLSTATE
+  `42501` counts as a refusal, matched by code rather than message.
+- **`aiprovider.ScopedProvider` gives the widget's `entities` setting
+  teeth.** cryden's `widget.Ask` force-scopes every parsed intent to the
+  calling end user's own rows, overwriting whatever identity filter the
+  model produced rather than validating it — no oracle — but it does so
+  over all of `ai.AllowedEntities`. Narrowing that is a host decision, so
+  this repo refuses an out-of-scope entity in front of the provider.
+- **`settings.AskAIWidgetConfig` is not a credential**, and that is why
+  it has no `Redacted` counterpart while the other two do. All three are
+  stored through the same `Secrets` wrapper anyway — one storage path
+  with one rule about what reaches the table is worth more than saving a
+  decryption.
+
+`aiprovider.NewAnthropic` is a real `ai.LLMProvider` over the official
+Anthropic Go SDK, and `aiprovider.NewPostgresSnapshot` a real
+`ai.QueryableStore`. **Nothing wires either from the stored config yet**:
+the only consumer would be a widget serving endpoint, which does not
+exist, so that glue lands with its first caller rather than being
+written blind. `allowed_origins` is stored and validated but nothing
+consults it at request time for the same reason, and the widget GET
+carries no embed snippet because the URL in one would name a route this
+repo does not serve.
+
+What Stage 2 does **not** have evidence for, and `PROGRESS.md` says in
+full: `CheckReadOnly` has never run against a real Postgres (the tested
+branch is the *unverifiable* one, not the pass), the Anthropic provider
+has never called Anthropic (it is tested against a local fake in the
+Messages API's wire shape), and `013_settings` has never been applied to
+a database.
+
+**The read-only rule now has a named exception, and it is this one.**
+`/v1/admin/settings/*` is the admin surface's first write. The reading
+is that `CLAUDE.md`'s rule covers the AI *tools* — which cryden builds
+through interfaces carrying no way to act — rather than every route
+under `/v1/admin`, and that a settings save is exactly what `NEXT.md`'s
+pre-fill-never-auto-apply decision names as the human half. No
+AI-assisted handler holds a reference to these routes, and none accepts
+a suggestion as input. The alternative readings (store the key in
+cryden, or environment-only) are worse and one of them is explicitly
+ruled out by `NEXT.md`, which says this repo owns that config storage.
+
+## Tier 5
 
 Not started. See `NEXT.md` for the full, ordered, specced-in-detail
-queue. Stage 2 is the LLM provider config, the read-only database
-provider config and the ask-AI widget config;
-`ai.LLMProvider`/`ai.QueryableStore` have no implementation in this repo
-yet, so nothing in it has an endpoint. Two decisions are open and were
-left for the user rather than guessed at: whether this repo ships a live
-LLM client against a real vendor (an outbound integration, which this
-repo has so far shipped none of), and where the at-rest encryption key
-for the stored provider credential comes from (reusing the existing
-`ENCRYPTION_KEY` is the obvious candidate and still a decision with a
-blast radius). Tier 4 stays read-only by construction, with the
-decision already made that an AI suggestion **pre-fills** a settings
-form and never auto-applies.
+queue — the users admin surface, which has no engine gap and is just
+missing endpoints, plus the widget's own serving endpoint, which is what
+the Stage 2 config above is waiting for.
 
