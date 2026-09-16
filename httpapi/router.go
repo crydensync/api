@@ -199,10 +199,12 @@ func NewRouter(d Deps) http.Handler {
 	// this repo's own logic — cryden has no concept of a provider being
 	// reachable, and no bulk way to read stored hash algorithms.
 	//
-	// Every endpoint here is read-only, and has to stay that way — the one
-	// exception is the /v1/admin/settings/* block at the bottom of this
-	// table, which is a settings save and not an action any AI tool can
-	// reach. See CLAUDE.md's hard rule about the admin surface.
+	// Read-only is the default and every write here is deliberate: the
+	// per-user metadata block below (a write is the whole feature) and the
+	// settings block at the bottom (a settings save, the one path a tuning
+	// suggestion may pre-fill). Neither is reachable from an AI tool, which
+	// is what CLAUDE.md's hard rule actually protects. See README's note on
+	// the admin surface.
 	mux.HandleFunc("GET /v1/admin/oauth/health", RequireAdmin(engine, oauthHealth.Health))
 	mux.HandleFunc("GET /v1/admin/security/hash-migration", RequireAdmin(engine, security.HashMigration))
 
@@ -259,8 +261,11 @@ func NewRouter(d Deps) http.Handler {
 	// settings path. See TuningHandlers and CLAUDE.md's hard rule.
 	mux.HandleFunc("GET /v1/admin/config-tuning", RequireAdmin(engine, tuning.ConfigTuning))
 
-	// The AI settings surface — the only writes under /v1/admin, and the
-	// "human saves it" half of pre-fill-never-auto-apply.
+	// The AI settings surface — the "human saves it" half of
+	// pre-fill-never-auto-apply, and one of exactly two write blocks on
+	// this surface (the other is the per-user metadata block above; an
+	// earlier version of this comment claimed there was only one, which
+	// was wrong).
 	//
 	// The read-only rule above is about the AI *tools*, which are what the
 	// engine's interfaces make read-only by carrying no method that can
