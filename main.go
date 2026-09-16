@@ -112,10 +112,16 @@ func main() {
 		log.Printf("AI settings endpoints enabled (llm-provider, database-provider)")
 	}
 
+	// Hoisted for the same reason users and audit are: the router reads
+	// the same instance. GET /v1/admin/users/{userID} reports a live
+	// session count, and a count taken from a second store object would
+	// describe sessions the engine is not the one revoking.
+	sessions := postgres.NewSessionStore(db)
+
 	engineCfg := cryden.Config{
 		JWTSecret:       cfg.JWTSecret,
 		Users:           users,
-		Sessions:        postgres.NewSessionStore(db),
+		Sessions:        sessions,
 		Audit:           audit,
 		Verifications:   postgres.NewVerificationStore(db),
 		EmailSender:     &consoleEmailSender{Templates: emailTemplates},                           // dev stand-in — see email_sender.go
@@ -367,6 +373,8 @@ func main() {
 		Users:  users,
 		Meta:   metadata,
 		Hooks:  webhookStore,
+
+		Sessions: sessions,
 
 		Shipped: shippedLog,
 

@@ -43,6 +43,11 @@ type Deps struct {
 	Audit store.AuditStore
 	Users store.UserStore
 
+	// Sessions backs the live-session count on GET
+	// /v1/admin/users/{userID}. The same instance the engine holds, so
+	// the count describes the sessions the engine would revoke.
+	Sessions store.SessionStore
+
 	// Meta backs the per-user metadata endpoints. This repo's own table
 	// and package — cryden's store.User has no metadata concept and will
 	// not gain one (see usermeta's package doc).
@@ -99,6 +104,7 @@ func NewRouter(d Deps) http.Handler {
 	apiKeys := &APIKeyHandlers{Engine: engine}
 	security := &SecurityHandlers{Audit: d.Audit, Users: d.Users, Config: d.Config}
 	metadata := &MetadataHandlers{Users: d.Users, Meta: d.Meta}
+	users := &UserHandlers{Engine: engine, Users: d.Users, Sessions: d.Sessions, Audit: d.Audit}
 	hooks := &WebhookHandlers{Store: d.Hooks}
 	logging := &LoggingHandlers{Store: d.Shipped}
 	digests := &DigestHandlers{Engine: engine, Store: d.Digests}
@@ -207,6 +213,22 @@ func NewRouter(d Deps) http.Handler {
 	// the admin surface.
 	mux.HandleFunc("GET /v1/admin/oauth/health", RequireAdmin(engine, oauthHealth.Health))
 	mux.HandleFunc("GET /v1/admin/security/hash-migration", RequireAdmin(engine, security.HashMigration))
+
+	// The user surface — finding an account, and reading one account's
+	// state. Read-only: there is no lock, unlock, password reset or
+	// delete here, deliberately (see UserHandlers). This is the only
+	// place an operator sees an account that is not their own, so the
+	// detail view reports a lockout and cannot clear one, and shows a
+	// session count rather than an account's devices.
+	//
+	// GET /v1/admin/users is registered without a trailing segment and
+	// the detail route with one, which Go's ServeMux distinguishes; the
+	// metadata routes below are more specific still and win over the
+	// detail route for their own paths.
+	mux.HandleFunc("GET /v1/admin/users", RequireAdmin(engine, users.List))
+	mux.HandleFunc("GET /v1/admin/users/{userID}", RequireAdmin(engine, func(w http.ResponseWriter, r *http.Request) {
+		users.Detail(w, r, r.PathValue("userID"))
+	}))
 
 	// Per-user metadata — the table behind JWT claim mapping. Per key
 	// rather than a whole-map PUT, so two operators editing different
