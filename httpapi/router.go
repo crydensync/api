@@ -213,6 +213,11 @@ func NewRouter(d Deps) http.Handler {
 	// the admin surface.
 	mux.HandleFunc("GET /v1/admin/oauth/health", RequireAdmin(engine, oauthHealth.Health))
 	mux.HandleFunc("GET /v1/admin/security/hash-migration", RequireAdmin(engine, security.HashMigration))
+	// Second-factor enrolment, as the engine's own audit events against the
+	// user total. Reports events rather than users, and says so — cryden
+	// has no count of accounts with a factor enrolled, and getting one from
+	// here would mean SQL against the engine's schema. See MFAAdoption.
+	mux.HandleFunc("GET /v1/admin/security/mfa-adoption", RequireAdmin(engine, security.MFAAdoption))
 
 	// The user surface — finding an account, and reading one account's
 	// state. Read-only: there is no lock, unlock, password reset or
