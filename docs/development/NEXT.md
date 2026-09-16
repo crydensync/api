@@ -1,12 +1,12 @@
 # api — next up
 
 Ordered queue. Take the first unfinished item, build it completely,
-verify it (see `CODEX.md`), update the three docs
+verify it (see `CLAUDE.md`), update the three docs
 (`CURRENT-STATE.md`/`NEXT.md`/`PROGRESS.md`), then stop for review
 before starting the next tier. Specs below are deliberately detailed
 so you don't need to ask anything mid-build — where something is
 genuinely unspecified, make the most reasonable call consistent with
-`CODEX.md`'s ownership rules and note the assumption in `PROGRESS.md`.
+`CLAUDE.md`'s ownership rules and note the assumption in `PROGRESS.md`.
 
 Tier 0 and Tier 0.5 are done — see `CURRENT-STATE.md`.
 Tier 1 is done — see the status note under Tier 1 and `PROGRESS.md`'s
@@ -16,6 +16,10 @@ Tier 2 is done — see the status note under Tier 2 and `PROGRESS.md`'s
 migrations to copy.
 Tier 3 is done, in two stages on `feat/tier3-config-and-endpoints` — see
 the status note under Tier 3 and `PROGRESS.md`'s 2026-09-15 entries.
+Tier 4 is **in progress** on `feat/tier4-ai-admin-endpoints`: Stage 1
+(digest + scheduling + history, support diagnosis, config tuning
+advisor) is built — see the status note under Tier 4. Stage 2 (the LLM
+and database providers, and the ask-AI widget config) is not started.
 
 ---
 
@@ -29,7 +33,7 @@ the status note under Tier 3 and `PROGRESS.md`'s 2026-09-15 entries.
 > What is still owed: a first DB-backed smoke-test run (no Postgres in
 > this sandbox), a live Apple round trip (no Apple credentials here), and
 > the WebAuthn ceremonies, which need a real browser authenticator.
-> `PROGRESS.md` says all of that plainly, per `CODEX.md`'s verification
+> `PROGRESS.md` says all of that plainly, per `CLAUDE.md`'s verification
 > rule, rather than counting green unit tests as end-to-end coverage.
 
 Each of these mirrors an existing engine feature that already has a
@@ -284,8 +288,83 @@ Two details were decided rather than assumed, and are recorded in
 
 ## Tier 4 — AI-assisted admin endpoints (all behind `RequireAdmin`)
 
-Every endpoint in this tier stays read-only/surface-only, no
-exceptions — see `CODEX.md`'s hard rule at the top.
+> **Status: Stage 1 and Stage 2 are both built on
+> `feat/tier4-ai-admin-endpoints`.** The weekly digest and its schedule
+> and history, the support-ticket assistant, the config tuning advisor,
+> the LLM provider config, the read-only database provider config and the
+> ask-ai widget config all exist, are wired in `main.go`, and are tested
+> end to end on the in-memory stores — `go build`/`go vet`/`go test ./...`
+> clean, `httpapi` also green under `-race`.
+>
+> What is still owed, said plainly, because none of it is a small
+> caveat:
+>
+> - **No migration in this tier has ever been applied to a database.**
+>   There is still no Postgres in this sandbox, so `012_digest_runs` and
+>   `013_settings` have only been reasoned about, not run — the same is
+>   true of `009`–`011`. Every `PostgresStore` added here is unexercised.
+> - **`aiprovider.CheckReadOnly` has never run against a real Postgres.**
+>   The probe is a `CREATE TEMP TABLE` plus an `INSERT`, and the branch
+>   that matters — SQLSTATE 42501 arriving as a `*pq.Error` — has only
+>   been tested against a closed port, which is the *unverifiable*
+>   outcome rather than the pass. The accepting path is the one no test
+>   here covers.
+> - **The Anthropic provider has never called Anthropic.** It is tested
+>   against a local `httptest` server in the Messages API's wire shape,
+>   which pins the request this repo builds and the response it parses,
+>   but it is not evidence that the live service agrees.
+> - **The ask-ai widget has no serving endpoint.** Stage 2 stores its
+>   embed and scope configuration and enforces the scope in
+>   `aiprovider.ScopedProvider`; nothing yet calls `widget.Ask`. So
+>   `allowed_origins` is recorded and validated but nothing consults it
+>   at request time, and the GET response deliberately carries no embed
+>   snippet, because the URL in one would name a route this repo does
+>   not serve.
+>
+> What is still owed from Stage 1:
+>
+> - the digest schedule is a goroutine on `context.Background()`, because
+>   this repo still has no graceful shutdown.
+>
+> Three things this tier changed that were not in the spec below, all
+> recorded because they are behaviour rather than plumbing:
+>
+> - **`LOCKOUT_THRESHOLD`/`LOCKOUT_DURATION_MINUTES` are now passed to
+>   the engine.** cryden does not default these — it reads whatever it
+>   is handed, and `0`/`0` means an account is locked on its first
+>   failed password until an instant already past, which is to say
+>   never. Until this tier the engine ran with both at zero. So this is
+>   a real behaviour change, not a tidy-up, and it is why the tuning
+>   report can quote the lockout settings in force rather than cryden's
+>   documented defaults.
+> - **`GET /v1/admin/digest` records nothing.** The spec puts scheduling
+>   and history in this repo, and that is still exactly where the
+>   writing happens — but the on-demand endpoint deliberately does not
+>   write a row, so an operator hitting it twenty times does not fill
+>   the history with twenty near-identical reports. Only the scheduled
+>   job writes.
+> - **`/v1/admin/settings/*` is the admin surface's first write**, and
+>   the read-only rule below has been read as covering the AI *tools*
+>   rather than every route under `/v1/admin`. The reasoning is in
+>   `SettingsHandlers`' doc comment and in `CLAUDE.md`'s own wording: a
+>   settings save is what "a human still has to explicitly save that
+>   change through the normal config UI" names, and no AI-assisted
+>   handler holds a reference to it. The alternative reading — store the
+>   LLM key in cryden, or in the environment only — is worse: the spec
+>   below explicitly says this repo owns that config storage.
+>
+> The two decisions this tier had recorded as open were resolved by
+> following this file's own instruction to make the reasonable call and
+> note it: the live provider is built on the **official Anthropic Go
+> SDK** rather than hand-rolled HTTP, and the settings credentials use a
+> **dedicated `SETTINGS_ENCRYPTION_KEY`** rather than reusing cryden's
+> `ENCRYPTION_KEY`, matching this repo's existing convention of
+> purpose-specific keys (`CLOUD_LOG_HASH_KEY`).
+
+Every AI-assisted endpoint in this tier is read-only by construction —
+see `CLAUDE.md`'s hard rule at the top. The settings routes at the end of
+this list are not AI-assisted endpoints: they are the settings save those
+tools' suggestions pre-fill.
 
 - **Weekly digest**: `GET /v1/admin/digest` → `cryden.WeeklyDigest`/
   `DigestSince`. Plus **scheduling and history** (new, this repo's own
@@ -318,6 +397,15 @@ exceptions — see `CODEX.md`'s hard rule at the top.
   at-rest encryption — treat this credential with the same care as
   `JWT_SECRET`). This repo then constructs the real `ai.LLMProvider`
   implementation from that stored config at startup or on change.
+  **Built, with one piece of this bullet not done.** The endpoints
+  exist, `DELETE` was added alongside `GET`/`PUT` (a settings screen
+  with no way to clear a credential is a screen an operator cannot
+  leave), and `aiprovider.NewAnthropic` is the real implementation,
+  built on the official Anthropic Go SDK. What is **not** built is the
+  last sentence: nothing reads the stored config and constructs a
+  provider from it, because nothing consumes one yet — the widget's
+  serving endpoint does not exist. The glue lands with its first
+  caller rather than before it, so it is not written blind.
 - **Database Provider config** (new): same shape, for pointing
   `ai.QueryableStore` at a read-only database role/connection string.
   **The read-only-role requirement is not optional** — cryden's own
@@ -327,10 +415,30 @@ exceptions — see `CODEX.md`'s hard rule at the top.
   role is actually read-only before accepting it if there's any
   feasible way to check (e.g. attempt a write and confirm it's
   rejected), don't just trust a checkbox in the UI.
+  **Built.** `PUT` connects with the supplied credentials and refuses
+  to store anything until the server has rejected a write on that
+  connection — see `aiprovider.CheckReadOnly`. Two outcomes are
+  distinguished that the bullet does not mention, because they call
+  for different words: a role that *can* write, and a check that could
+  not reach a conclusion. The second is refused too, since treating it
+  as a pass would make the check succeed exactly when it is least able
+  to tell. `aiprovider.NewPostgresSnapshot` is the matching
+  `ai.QueryableStore`; like the provider above, nothing constructs it
+  from the stored config yet, for the same reason.
 - **Ask-AI widget embed/scope config** (new): once the two providers
   above exist, `widget.Ask` itself needs no new engine work — expose
   whatever embed snippet / scope configuration the csax+ console needs
   as its own settings endpoint.
+  **Built, with two deliberate departures.** The endpoint stores the
+  widget's enabled flag, origins, entity scope and copy.
+  `aiprovider.ScopedProvider` then *enforces* the entity scope —
+  cryden's `widget.Ask` scopes every intent to the calling end user but
+  does so over all of `ai.AllowedEntities`, so narrowing that is a host
+  decision and a scope setting nothing consulted would be worse than no
+  setting. And the response carries **no embed snippet**: the snippet is
+  markup the console renders into its own pages, and the URL in one
+  would name a route this repo does not serve. The console gets the
+  configuration a snippet is built from instead.
 
 ---
 

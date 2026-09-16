@@ -1,4 +1,4 @@
-# CODEX.md — working conventions for this repo
+# CLAUDE.md — working conventions for this repo
 
 Read this fully before writing any code. Then read `docs/development/CURRENT-STATE.md`
 (what exists and why) and `docs/development/NEXT.md` (the ordered queue,
