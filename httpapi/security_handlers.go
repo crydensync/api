@@ -159,3 +159,130 @@ func (h *SecurityHandlers) hasher() hasherDTO {
 		Parallelism: p.Parallelism,
 	}
 }
+
+// mfaFactorDTO is the enrolment and removal history of one second factor.
+//
+// Every field counts EVENTS. None of them counts users, and the names say
+// so, because the two are not the same number here and the difference is
+// larger than it was for the hash migration beside this report. A user who
+// turns TOTP on, loses their phone and turns it off contributes one
+// EnrolledEvent and one RemovedEvent and is enrolled zero times over. So
+// EnrolledEvents is not an adoption figure, it is not "how many accounts
+// have this", and no percentage is derived from it anywhere in this API —
+// a ratio of events to TotalUsers would be a number that looks like
+// coverage and moves for the wrong reasons.
+//
+// The two counts against each other are the honest read: a factor whose
+// removals keep pace with its enrolments is churning, and the windowed
+// pair is what says whether that is happening now.
+type mfaFactorDTO struct {
+	// Factor is "totp" or "passkey" — the name a console shows.
+	Factor string `json:"factor"`
+
+	EnrolledEvents         int `json:"enrolled_events"`
+	RemovedEvents          int `json:"removed_events"`
+	EnrolledEventsInWindow int `json:"enrolled_events_in_window"`
+	RemovedEventsInWindow  int `json:"removed_events_in_window"`
+}
+
+// mfaAdoptionDTO is the whole report.
+//
+// Its shape is deliberately not "N of M users have MFA", and the reason is
+// worth stating because the honest answer is less satisfying than the
+// expected one. cryden cannot be asked how many accounts have a second
+// factor: TOTPStore has Upsert/GetByUserID/Confirm/Delete and
+// WebAuthnCredentialStore has Add/ListByUser/Update/Delete — both are
+// per-user, and neither has a Count or a ListAll. Counting the rows in
+// totp_secrets from here would answer it exactly and would also be this
+// repo writing SQL against the engine's own schema, which is the boundary
+// CLAUDE.md draws and the same boundary that keeps the user search on
+// cryden.GetUser instead of a LIKE query.
+//
+// So this reports what the engine does record system-wide — the audit
+// events it writes when a factor is enrolled or removed — and says exactly
+// that.
+type mfaAdoptionDTO struct {
+	TotalUsers int `json:"total_users"`
+	WindowDays int `json:"window_days"`
+
+	// Factors is one entry per factor, in a stable order so a console can
+	// index it.
+	Factors []mfaFactorDTO `json:"factors"`
+}
+
+// mfaAdoptionFactors pairs each factor with the two event types that
+// record it, so the loop below and any future reader agree on the mapping.
+// Recovery codes are not in this list: they are a fallback for an account
+// that already has a second factor rather than a factor of their own, and
+// counting EventRecoveryCodesGenerated as enrolment would report a
+// different thing than the label says.
+var mfaAdoptionFactors = []struct {
+	name     string
+	enrolled store.AuditEventType
+	removed  store.AuditEventType
+}{
+	{"totp", store.EventTOTPEnabled, store.EventTOTPDisabled},
+	{"passkey", store.EventWebAuthnRegistered, store.EventWebAuthnRemoved},
+}
+
+// MFAAdoption — admin required (see router.go). Reports second-factor
+// enrolment and removal as the engine's own audit events, all-time and
+// over a window, against the user total.
+//
+// Read-only by construction, like its neighbour: it calls count methods
+// and records nothing. See mfaAdoptionDTO for why it reports events rather
+// than users, which is the one thing about this endpoint a reader is
+// likely to misread.
+func (h *SecurityHandlers) MFAAdoption(w http.ResponseWriter, r *http.Request) {
+	if h.Audit == nil || h.Users == nil {
+		writeErr(w, errAdminStoresUnavailable)
+		return
+	}
+
+	windowDays, err := queryInt(r, "window_days", hashMigrationDefaultWindowDays, 1, 365)
+	if err != nil {
+		writeBadRequest(w, err.Error())
+		return
+	}
+
+	ctx := r.Context()
+
+	total, err := h.Users.Count(ctx)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	// A zero time.Time as `since` is an open lower bound rather than a
+	// date anyone chose — both implementations read it as "at or after
+	// the beginning of time", so this is the all-time count. CountByType
+	// omits a type that did not occur, which is why a missing key reads
+	// as zero rather than as an error.
+	allTime, err := h.Audit.CountByType(ctx, time.Time{})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	windowed, err := h.Audit.CountByType(ctx, time.Now().AddDate(0, 0, -windowDays))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+
+	factors := make([]mfaFactorDTO, 0, len(mfaAdoptionFactors))
+	for _, f := range mfaAdoptionFactors {
+		factors = append(factors, mfaFactorDTO{
+			Factor:                 f.name,
+			EnrolledEvents:         allTime[f.enrolled],
+			RemovedEvents:          allTime[f.removed],
+			EnrolledEventsInWindow: windowed[f.enrolled],
+			RemovedEventsInWindow:  windowed[f.removed],
+		})
+	}
+
+	writeData(w, http.StatusOK, mfaAdoptionDTO{
+		TotalUsers: total,
+		WindowDays: windowDays,
+		Factors:    factors,
+	})
+}
