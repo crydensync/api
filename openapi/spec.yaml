@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: CrydenSync API
-  version: "1.4"
+  version: "1.5"
   description: >
     A self-hosted HTTP wrapper around the CrydenSync auth engine.
     Every response follows one of two envelope shapes: {"data": ...}
@@ -39,6 +39,24 @@ info:
     nothing else and its suggestions pre-fill a settings field for a
     human to save rather than being applied, and only a background job
     this API runs writes the digest history.
+
+    1.5 is additive, and is the first version with admin endpoints that
+    WRITE: the AI provider settings (GET/PUT/DELETE
+    /admin/settings/llm-provider, /admin/settings/database-provider and
+    /admin/settings/ask-ai-widget). No existing path, field or status
+    code changed. The writes are the "human saves it" half of the
+    pre-fill rule 1.4 describes — a tuning suggestion pre-fills one of
+    these forms and an operator saves it — and they are the only place
+    a credential is stored. PUT database-provider additionally verifies
+    against the database itself that the supplied role cannot write,
+    and refuses to store the connection until the server has rejected
+    one; see that path's description for why the check is done there
+    and not in the console.
+
+    1.5 is also the first version whose responses depend on a
+    deployment setting that is not a cryden one: all three paths answer
+    404 not_configured unless SETTINGS_ENCRYPTION_KEY is set, since
+    without that key there is nowhere safe to put a credential.
 servers:
   - url: http://localhost:8080/v1
     description: Local dev
@@ -402,6 +420,173 @@ components:
             suggestive ("consider ..."), never imperative: nothing here
             has been applied, and nothing that reads this response can
             apply it either.
+
+    LLMProviderInput:
+      type: object
+      description: >
+        The PUT body for the LLM provider. Separate from what is stored
+        rather than the same shape, so the wire contract and the stored
+        record can diverge — and so a field added to the stored config
+        later is not silently accepted from a client that predates it.
+      required: [kind, model, api_key]
+      properties:
+        kind:
+          type: string
+          description: >
+            Which provider implementation to build. One value today:
+            "anthropic".
+        model:
+          type: string
+          description: >
+            The model id to call, e.g. "claude-opus-5". Validated for
+            shape, not against a list: this API does not decide which
+            models a deployment may use, and a list here would go stale
+            between SDK releases.
+        api_key:
+          type: string
+          description: >
+            The provider credential. Required on every write — see PUT
+            on this path for why "blank keeps the existing one" is
+            refused. Sealed before storage and never returned.
+        max_tokens:
+          type: integer
+          minimum: 256
+          maximum: 8192
+          description: >
+            Ceiling on a single model response. Defaults when omitted
+            (0), rather than failing validation.
+
+    RedactedLLMProvider:
+      type: object
+      description: >
+        What GET, PUT and DELETE return. There is no field for the API
+        key in this schema and no mask of one — a console renders
+        "saved" from api_key_set. All fields are false/empty when
+        nothing is configured.
+      properties:
+        kind:
+          type: string
+          description: The stored provider kind, or empty when none is stored.
+        model:
+          type: string
+          description: The stored model id, or empty when none is stored.
+        max_tokens:
+          type: integer
+          description: The stored ceiling, or 0 when none is stored.
+        api_key_set:
+          type: boolean
+          description: Whether a credential is stored. Says nothing about whether it still works.
+        configured:
+          type: boolean
+          description: >
+            Whether anything is stored at all. A console branches on
+            this to decide between an empty form and a saved one.
+
+    DatabaseProviderInput:
+      type: object
+      description: The PUT body for the read-only database.
+      required: [label, dsn]
+      properties:
+        label:
+          type: string
+          description: >
+            What a console shows instead of the connection string, so an
+            operator can tell two configurations apart without reading a
+            password.
+        dsn:
+          type: string
+          description: >
+            The full Postgres connection string, including the
+            credential. Either a postgres:// or postgresql:// URL or a
+            lib/pq keyword/value string carrying a host. Checked for
+            shape here, then used to connect and attempt a write before
+            anything is stored.
+        max_rows:
+          type: integer
+          minimum: 1
+          maximum: 500
+          description: >
+            Ceiling on rows from a single AI-driven query. Defaults when
+            omitted (0). Bounded by cryden's own maximum, so this cannot
+            become a setting that does not do what it appears to.
+
+    RedactedDatabaseProvider:
+      type: object
+      description: >
+        What GET, PUT and DELETE return. The DSN has no field here at
+        all, so a handler cannot serialise it by reaching for the wrong
+        type. Host and database come back because an operator needs them
+        to recognise which connection is stored; the user and password
+        never do.
+      properties:
+        label:
+          type: string
+          description: The operator-supplied name for this connection.
+        max_rows:
+          type: integer
+          description: The stored row ceiling.
+        dsn_set:
+          type: boolean
+          description: Whether a connection string is stored.
+        host:
+          type: string
+          description: >
+            Host and port from the stored connection string, for
+            display. Empty when nothing is stored or the string cannot
+            be parsed — this decorates a response and never fails one.
+        database:
+          type: string
+          description: Database name from the stored connection string, for display.
+        configured:
+          type: boolean
+          description: Whether anything is stored at all.
+
+    AskAIWidgetConfig:
+      type: object
+      description: >
+        The ask-ai widget's configuration, and both the PUT body and the
+        GET response — this is the one setting on this surface that is
+        not a credential, so there is nothing to redact. All fields are
+        false/empty when nothing is configured, which is what makes the
+        unconfigured state read as "the widget is off".
+      properties:
+        enabled:
+          type: boolean
+          description: >
+            Whether the widget is offered to end users at all. A
+            disabled widget is a 404 from whatever serves it, not an
+            empty answer.
+        allowed_origins:
+          type: array
+          maxItems: 20
+          items: { type: string }
+          description: >
+            Origins permitted to embed the widget — scheme, host and
+            optional port, never a path or a pattern. "*" is refused by
+            name: this widget answers questions about the signed-in
+            user's own sessions and audit events, so a wildcard would
+            let any page on the internet ask them through a visitor's
+            browser.
+        entities:
+          type: array
+          maxItems: 8
+          items: { type: string }
+          description: >
+            Which of cryden's allowlisted entities the widget will
+            answer over — the host narrowing the engine's vocabulary.
+            Validated against cryden's own allowlist rather than a copy
+            of it. This is the one field here with teeth: the API
+            enforces the configured subset in front of the provider,
+            since cryden's widget.Ask scopes to the calling user but
+            does so over every entity it allowlists.
+        greeting:
+          type: string
+          maxLength: 200
+          description: The copy the embed shows before a question is asked. Required when enabled.
+        placeholder:
+          type: string
+          maxLength: 200
+          description: The input's placeholder text. Optional.
 
   responses:
     BadRequest:
@@ -1411,6 +1596,386 @@ paths:
             an unset DIGEST_INTERVAL_HOURS produces. Answered rather than
             returned as an empty list, which an operator would read as
             "no digest has ever been built".
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/settings/llm-provider:
+    get:
+      summary: The configured LLM provider, without its credential
+      description: >
+        Admin only. Returns which model and token ceiling back the
+        AI-assisted admin features, and whether a credential is stored —
+        never the credential itself, in any form. It is not masked and
+        not truncated to its last few characters: a console does not need
+        it (it renders "saved" from `api_key_set`), and returning any
+        part of it would put the secret in a browser's memory and a
+        devtools panel, which is what encrypting it at rest was for.
+
+        Nothing configured yet is a 200 with `configured: false`, not a
+        404: an empty settings form is an answer a console renders, while
+        a 404 would make it render a broken panel. Compare GET
+        /admin/digest/history, where the 404 is right because there the
+        absence means the feature is off rather than unconfigured.
+
+        Answers 404 not_configured when SETTINGS_ENCRYPTION_KEY is unset,
+        which is this deployment saying it has nowhere safe to put a
+        credential.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: >
+            The stored provider with the credential replaced by
+            `api_key_set`, or an all-false body when none is stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/RedactedLLMProvider' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: not_configured. See this path's description.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: >
+            setting_undecryptable — a credential is stored but this
+            deployment's key cannot open it, which almost always means
+            SETTINGS_ENCRYPTION_KEY changed. Deliberately not reported
+            as 404: the setting is there, and telling an operator it is
+            missing would send them to re-enter a credential that is
+            fine. DELETE clears the row without needing the key.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    put:
+      summary: Store an LLM provider
+      description: >
+        Admin only. The credential is required on every write rather than
+        being optional with "blank means keep the existing one". That
+        convention is the usual one and it is the wrong one here: an
+        omitted field and a deliberately cleared one would be the same
+        request, and the failure mode of getting it wrong is a form that
+        looks as though it saved a key while silently storing an empty
+        one.
+
+        The stored value is sealed with AES-256-GCM before it reaches the
+        table, keyed from SETTINGS_ENCRYPTION_KEY — a separate secret
+        from cryden's ENCRYPTION_KEY on purpose, since the two have
+        different lifetimes and blast radii. This credential is treated
+        with the same care as JWT_SECRET: it is never logged, never
+        returned, and never written in the clear.
+
+        `max_tokens` defaults when omitted (0) rather than failing
+        validation, since a console that does not ask is the common case.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LLMProviderInput' }
+      responses:
+        '200':
+          description: >
+            The stored provider, redacted. Echoed as stored rather than
+            as submitted, minus the credential.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/RedactedLLMProvider' }
+        '400':
+          description: >
+            invalid_llm_provider — an unknown kind, a missing or
+            malformed credential, or max_tokens outside the accepted
+            range. The message names the offending field and bound: the
+            caller is already an operator and none of it is secret.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: not_configured. See GET on this path.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    delete:
+      summary: Clear the stored LLM provider
+      description: >
+        Admin only. Switches the AI-assisted query features off until a
+        provider is configured again.
+
+        Needs no encryption key, which is what makes it the way out for a
+        deployment that has lost SETTINGS_ENCRYPTION_KEY and can no
+        longer read what it stored: clearing is always possible, even
+        when reading is not.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Always the all-false redacted body.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/RedactedLLMProvider' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: not_configured. See GET on this path.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/settings/database-provider:
+    get:
+      summary: The configured read-only database, without its credential
+      description: >
+        Admin only. Returns the label, the row ceiling and the two
+        harmless halves of the connection string — host and database —
+        so an operator can tell which connection is stored without being
+        shown a password. The user, the password and the full DSN are not
+        returned in any form and have no field in the response schema.
+
+        Nothing configured yet is a 200 with `configured: false`; 404
+        not_configured when SETTINGS_ENCRYPTION_KEY is unset. Same
+        reasoning as GET /admin/settings/llm-provider.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: The stored connection, described rather than returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/RedactedDatabaseProvider' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: not_configured. See this path's description.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: setting_undecryptable. See GET /admin/settings/llm-provider.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    put:
+      summary: Store a read-only database connection, after verifying it
+      description: >
+        Admin only. This endpoint is where cryden's "the credential
+        boundary, not just the allowlist, is the real safety guarantee"
+        requirement is enforced, and it enforces it in three steps whose
+        order is the whole design:
+
+        1. Validate the shape, which is cheap and local.
+        2. Connect with the supplied credentials and ATTEMPT A WRITE —
+           create a temporary table, in the session's own pg_temp schema
+           so nothing is left behind. Nothing is stored unless the
+           database itself refuses.
+        3. Only then store it, sealed.
+
+        The check is an attempted write rather than a reading of the
+        role's attributes, and it cannot be done in the console: a
+        "read-only?" checkbox is a claim about a database made by whoever
+        ticked it, and a browser cannot open a Postgres connection at
+        all. Only the server's refusal is evidence, and it is evidence
+        about the actual role, on the actual database, through the actual
+        credentials.
+
+        The cost is that this endpoint is slower than its neighbours: it
+        opens a connection and runs statements before answering, bounded
+        by a ten-second timeout. That is paid once per save, not per
+        query. A connection that cannot be made, times out, or fails for
+        any reason other than an insufficient-privilege refusal is
+        refused as unverified — not accepted. Treating "could not find
+        out" as a pass would make the check succeed exactly when it is
+        least able to tell.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DatabaseProviderInput' }
+      responses:
+        '200':
+          description: The stored connection, redacted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/RedactedDatabaseProvider' }
+        '400':
+          description: >
+            invalid_database_provider for a malformed DSN, a missing
+            label or max_rows out of range; database_role_not_read_only
+            when the role could write; database_role_unverified when the
+            check could not reach a conclusion. The last two are
+            different answers on purpose — the first is a grant to
+            change, the second is usually a connection string to fix.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: not_configured. See GET on this path.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    delete:
+      summary: Clear the stored database connection
+      description: >
+        Admin only. Needs no encryption key, for the same reason
+        DELETE /admin/settings/llm-provider does not.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Always the unconfigured redacted body.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/RedactedDatabaseProvider' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: not_configured. See GET on this path.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/settings/ask-ai-widget:
+    get:
+      summary: The ask-ai widget's embed and scope configuration
+      description: >
+        Admin only. Returns the widget's enabled flag, the origins
+        allowed to embed it, the entities it will answer over, and its
+        copy.
+
+        Unlike the other two settings paths there is no redaction here,
+        because there is nothing to redact: none of these fields is a
+        credential, and all of them are what the console shows an
+        operator anyway.
+
+        There is deliberately no embed snippet in the response. The
+        snippet is markup the csax+ console renders into its own pages,
+        and the URL in it would name an endpoint this API does not serve
+        yet — so generating one here would hand a console a script tag
+        pointing at a 404. What this endpoint owes the console is the
+        configuration a snippet is built from, which is what it returns.
+
+        Nothing configured yet is a 200 with `enabled: false`, the zero
+        value: a console then shows the feature as off rather than
+        showing a form that looks as though someone filled it in.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: The stored widget configuration.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AskAIWidgetConfig' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: not_configured. See this path's description.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: setting_undecryptable. See GET /admin/settings/llm-provider.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    put:
+      summary: Store the ask-ai widget's embed and scope configuration
+      description: >
+        Admin only. This is the endpoint the config tuning advisor's
+        suggestions pre-fill, in the sense recorded for version 1.4: a
+        suggestion ends up as a value in this form and a human presses
+        save. Nothing calls it automatically, and no AI-assisted handler
+        in this API holds a reference to it.
+
+        `entities` is the one field with teeth rather than decoration.
+        cryden's widget.Ask force-scopes every parsed intent to the
+        calling end user's own rows — it discards whatever identity
+        filter the model produced and substitutes the real one — but it
+        scopes over the whole of cryden's allowlist. Narrowing that
+        further is a host decision, so this API enforces the configured
+        subset in front of the provider. The list is validated against
+        cryden's own allowlist rather than a copy of it, so this API
+        cannot refuse an entity the engine permits.
+
+        A disabled widget may be otherwise empty: an operator switching
+        the feature off should not have to fill in fields that are about
+        to stop mattering. Anything that IS filled in is still validated,
+        so a form cannot store a value that was never checked and would
+        be rejected the moment it was switched on.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AskAIWidgetConfig' }
+      responses:
+        '200':
+          description: The configuration as stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AskAIWidgetConfig' }
+        '400':
+          description: >
+            invalid_ask_ai_widget — an entity cryden does not allowlist,
+            a duplicated entity, a malformed or wildcard origin, or the
+            required fields missing while the widget is enabled. A
+            wildcard origin is refused by name with the reason, since
+            this widget answers questions about the signed-in user and
+            "*" would let any page on the internet ask them.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: not_configured. See GET on this path.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    delete:
+      summary: Clear the ask-ai widget configuration
+      description: >
+        Admin only. Leaves the widget disabled — the zero value — until
+        it is configured again. Needs no encryption key, like the other
+        two DELETEs on this surface.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Always the disabled, empty configuration.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AskAIWidgetConfig' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: not_configured. See GET on this path.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
