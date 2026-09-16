@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: CrydenSync API
-  version: "1.5"
+  version: "1.6"
   description: >
     A self-hosted HTTP wrapper around the CrydenSync auth engine.
     Every response follows one of two envelope shapes: {"data": ...}
@@ -59,6 +59,32 @@ info:
     deployment setting that is not a cryden one: all three paths answer
     404 not_configured unless SETTINGS_ENCRYPTION_KEY is set, since
     without that key there is nowhere safe to put a credential.
+
+    1.6 is additive: the admin user surface (GET /admin/users, GET
+    /admin/users/{userID}), the second-factor adoption report (GET
+    /admin/security/mfa-adoption) and the flagged-event review queue
+    (GET /admin/anomalies, PUT /admin/anomalies/{eventID}). No existing
+    path, field or status code changed.
+
+    Two of those are worth reading before the paths. GET /admin/users
+    searches by exact email only, case-sensitively, and says so in its
+    response: the engine stores addresses exactly as typed and compares
+    them with SQL's `=`, so partial or case-insensitive search is not a
+    gap left for later but a query this API declines to write against
+    the engine's own table. GET /admin/security/mfa-adoption reports
+    enrolment and removal EVENTS rather than users and derives no
+    adoption percentage, for the same reason: the engine has no count of
+    accounts with a factor enrolled, so a ratio built from events would
+    be a number that looks like coverage and is not.
+
+    PUT /admin/anomalies/{eventID} is a write, and is the third kind of
+    write on this API's admin surface, after 1.3's metadata and 1.5's
+    settings. It records an operator's judgement about an event the
+    engine flagged and takes no action on any account — there is no
+    machinery in this API that can, which is what keeps it on the right
+    side of the read-only rule. Nothing deletes a review: dismissing is
+    a status, and withdrawing a judgement stores "unreviewed" rather
+    than removing the row.
 servers:
   - url: http://localhost:8080/v1
     description: Local dev
@@ -265,6 +291,204 @@ components:
             instead of letting an operator discover the rule by being
             rejected. Read from the engine and this repo's own claim
             set, so it stays true as either changes.
+
+    MFAAdoption:
+      type: object
+      description: >
+        Second-factor enrolment and removal as the engine's own audit
+        events, all-time and over a window, against the user total.
+        Read-only.
+
+        This is deliberately not "N of M users have MFA", and the reason
+        is worth stating: the engine's TOTP and WebAuthn credential
+        stores are per-user with no count and no list-all, so it cannot
+        be asked how many accounts have a factor enrolled. Counting the
+        rows directly would answer it and would mean querying the
+        engine's own tables. So no percentage is derived anywhere here —
+        a ratio of events to users would be a number that looks like
+        coverage and moves for the wrong reasons.
+      properties:
+        total_users: { type: integer }
+        window_days: { type: integer, description: 1-365, default 7. }
+        factors:
+          type: array
+          description: One entry per factor, in a stable order.
+          items:
+            type: object
+            properties:
+              factor: { type: string, enum: [totp, passkey] }
+              enrolled_events: { type: integer }
+              removed_events: { type: integer }
+              enrolled_events_in_window: { type: integer }
+              removed_events_in_window: { type: integer }
+            description: >
+              Every field counts events, not users. A user who turns TOTP
+              on, loses their phone and turns it off contributes one
+              enrolment and one removal and is enrolled zero times over,
+              so enrolled_events is not an adoption figure. Recovery
+              codes are not a factor here: they are a fallback for an
+              account that already has one.
+
+    AdminUser:
+      type: object
+      description: >
+        One account, as the console sees it. PasswordHash is on the store
+        struct this is built from and is deliberately not on this schema
+        — a struct tag is not a guarantee, so the handler's own test
+        asserts against the raw body for any hash-shaped field.
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        failed_attempts: { type: integer }
+        locked:
+          type: boolean
+          description: >
+            Computed from the lockout deadline, not mirrored from the
+            stored column. The engine clears a lockout by time passing
+            rather than by writing a null, so a row can carry a
+            locked_until that is already in the past — exactly the case
+            somebody just waited out, and the one an operator most needs
+            reported correctly.
+        locked_until:
+          type: string
+          format: date-time
+          nullable: true
+
+    AdminUserList:
+      type: object
+      properties:
+        users:
+          type: array
+          items: { $ref: '#/components/schemas/AdminUser' }
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+        match:
+          type: string
+          enum: [exact_email, browse]
+          description: >
+            How this page was produced. "exact_email" means the list is
+            the single account whose email equals the query byte for
+            byte; "browse" means no query was given. It is in the
+            response because the surprising half is otherwise invisible:
+            the email match is exact AND case-sensitive, so
+            "Alice@example.com" does not find an account created as
+            "alice@example.com". A console can label the result and
+            explain a zero-result search rather than leaving an operator
+            to conclude the account is gone.
+        query: { type: string, description: The search that produced this page, empty when browsing. }
+
+    AdminUserDetail:
+      type: object
+      properties:
+        user: { $ref: '#/components/schemas/AdminUser' }
+        active_sessions:
+          type: integer
+          description: >
+            A count, not a list, deliberately. The engine's session store
+            returns only live sessions, so the count is honest; listing
+            them would publish every IP and user agent an account has
+            signed in from to anyone holding an operator token.
+        recent_activity:
+          type: array
+          description: The account's own audit history, newest first, capped at 20.
+          items: { $ref: '#/components/schemas/AuditEvent' }
+
+    AuditEvent:
+      type: object
+      description: >
+        One event as the engine recorded it. Metadata is passed through
+        unchanged: its keys are the engine's ("signals",
+        "distinct_accounts", "from"/"to"), they differ per event type,
+        and a host that renamed them would be inventing a second
+        vocabulary for the engine's own records.
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string }
+        ip: { type: string }
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+        created_at: { type: string, format: date-time }
+
+    AnomalyReview:
+      type: object
+      description: >
+        What a human decided about one flagged event. A row in this API's
+        own table, keyed on the audit event id — the engine's event reads
+        exactly the same before and after a review, because a review is
+        never a write to the engine's audit history.
+
+        Nothing here deletes. Dismissing sets a status; withdrawing a
+        judgement sets it back to "unreviewed", which is stored rather
+        than represented by a missing row, so the record that somebody
+        looked and who they were survives the change of mind.
+      properties:
+        status: { type: string, enum: [unreviewed, confirmed, dismissed] }
+        note: { type: string, description: Always present, empty when there is none. }
+        reviewer_id:
+          type: string
+          format: uuid
+          description: >
+            Omitted for an event nobody has called. The reviewer is the
+            authenticated operator, taken from the verified token and
+            never from the body.
+        updated_at:
+          type: string
+          format: date-time
+          description: Omitted for an event nobody has called, so a zero timestamp is never read as a very old decision.
+
+    Anomaly:
+      type: object
+      description: >
+        One queue row: the engine's event plus what a human said about it.
+        The review is nested rather than flattened so the two halves stay
+        visibly separate — a reader can tell which parts the engine wrote
+        and which parts this deployment did.
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [anomaly_detected, credential_stuffing_detected] }
+        user_id: { type: string, format: uuid }
+        ip: { type: string }
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+        created_at: { type: string, format: date-time }
+        review: { $ref: '#/components/schemas/AnomalyReview' }
+
+    AnomalyList:
+      type: object
+      properties:
+        anomalies:
+          type: array
+          items: { $ref: '#/components/schemas/Anomaly' }
+        limit: { type: integer }
+        offset: { type: integer }
+        status: { type: string, description: The filter that was applied, omitted when the whole queue was returned. }
+        has_more:
+          type: boolean
+          description: >
+            This page came back full, so there MAY be more — a client
+            should ask again rather than assume the queue ends here. It
+            is deliberately not "there IS more": deciding that exactly
+            would mean knowing the total, and a page that comes back
+            short of limit IS the end, because the merged window is an
+            exact prefix of the queue rather than a sample of it.
+
+    AnomalyReviewInput:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [unreviewed, confirmed, dismissed]
+          description: >
+            Required. A review whose decision is missing is not a review.
+            "unreviewed" is how a judgement is withdrawn; there is no
+            DELETE.
+        note: { type: string, maxLength: 500, description: Optional. }
 
     WebhookDelivery:
       type: object
@@ -1046,6 +1270,51 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
 
+  /admin/security/mfa-adoption:
+    get:
+      summary: Second-factor enrolment as the engine's own audit events
+      description: >
+        Admin only — an operator's token. For each factor (totp,
+        passkey): how many enrolment and removal events the engine has
+        recorded, all-time and over a window, alongside the user total.
+        Read-only by construction — it calls count methods and records
+        nothing.
+
+        It counts events, not users, and every field is named
+        accordingly. See the MFAAdoption schema for why no adoption
+        percentage is derived: the engine cannot be asked how many
+        accounts currently have a factor enrolled, so a ratio would be a
+        number that looks like coverage and is not. The pair that is
+        worth reading is enrolments against removals — a factor whose
+        removals keep pace is churning — and the windowed pair is what
+        says whether that is happening now.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: window_days
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 365, default: 7 }
+          description: >
+            The reporting window. Out of range or non-numeric is a 400,
+            not a silent clamp.
+      responses:
+        '200':
+          description: The report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/MFAAdoption' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: not_configured — the router was built without the stores this report reads.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
   /admin/oauth/health:
     get:
       summary: Reachability of each OAuth provider this API knows about
@@ -1074,6 +1343,113 @@ paths:
                         items: { $ref: '#/components/schemas/OAuthProviderHealth' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+
+  /admin/users:
+    get:
+      summary: Find an account by exact email, or browse accounts
+      description: >
+        Admin only — an operator's token. Two modes, chosen by whether
+        `q` is present: an exact-email lookup, or a page of every
+        account newest first. The response's `match` says which one
+        produced the page.
+
+        There is no partial or case-insensitive search, and that is a
+        decision rather than a gap. Partial search would mean SQL
+        against the engine's own users table, which is the boundary this
+        API keeps everywhere else: the engine owns that table, and a
+        query written against it here would be a second, silent
+        definition of what a user is. If partial search is wanted later
+        it is its own deliberate piece of work.
+
+        Read-only: there is no lock, unlock, password reset or delete on
+        this surface. An operator who needs one has the engine's own
+        admin path, not an HTTP endpoint this API invented.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: q
+          in: query
+          required: false
+          schema: { type: string }
+          description: >
+            An email to match exactly, byte for byte and case-sensitive,
+            because that is how the engine stores and compares
+            addresses. Absent or empty means browse. A search that finds
+            nothing is an empty 200, never a 404 — answering 404 would
+            make a console render "error" for the most ordinary outcome
+            a search has.
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, maximum: 10000, default: 0 }
+      responses:
+        '200':
+          description: >
+            The page. In exact-email mode limit and offset are echoed
+            rather than obeyed — an exact match is one account or none,
+            so there is nothing to page — and they are not rejected
+            either, since a console that keeps its page size fixed while
+            switching modes is doing nothing wrong.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AdminUserList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: not_configured — the router was built without the user store.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/users/{userID}:
+    get:
+      summary: One account's state, session count and recent history
+      description: >
+        Admin only — an operator's token. Reports the account, a count of
+        its live sessions and its most recent audit events.
+
+        Read-only, like everything else on this surface that is not an
+        explicit operator write: it reports a lockout and cannot clear
+        one. `locked` is computed from the deadline rather than mirrored
+        from the stored column, because the engine clears a lockout by
+        time passing rather than by writing a null — see the AdminUser
+        schema. Sessions are counted rather than listed, deliberately;
+        the SupportHandlers report makes the same choice for the same
+        reason.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: userID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The account
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AdminUserDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: >
+            not_found for an unknown or malformed userID — a path segment
+            that cannot be a user id is answered the same as one that
+            simply is not a user, since a malformed id handed to Postgres
+            is a driver error that would surface as a 500; or
+            not_configured when the stores are absent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
 
   /admin/users/{userID}/metadata:
     get:
@@ -1227,6 +1603,144 @@ paths:
             metadata_key_not_found when the user has no such key;
             not_found for an unknown or malformed userID; not_configured
             when the stores are absent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/anomalies:
+    get:
+      summary: The flagged-event review queue
+      description: >
+        Admin only — an operator's token. The two event types the engine
+        writes when a login looks wrong rather than merely failing
+        (anomaly_detected and credential_stuffing_detected), merged
+        newest first, each with the review recorded against it.
+
+        The queue is deliberately just those two. Widening it to the
+        failure events around them (login_failed, token_reuse_detected)
+        would not make a bigger queue, it would make the audit table the
+        queue — and a review surface that asks about everything asks
+        about nothing. Both of these carry a "signals" key naming what
+        tripped, which is what makes them reviewable: an operator can
+        read the event and form a judgement.
+
+        Read-only: it reads events and reviews and writes nothing.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [unreviewed, confirmed, dismissed] }
+          description: >
+            Narrows the page to one decision. An event with no review row
+            matches "unreviewed" — which is the tab an operator opens
+            first, so the two are treated as the same thing everywhere.
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, maximum: 10000, default: 0 }
+          description: >
+            Bounded by limit + offset <= 500, refused rather than clamped
+            beyond that. The engine's per-type search takes a limit and
+            no offset, so the merged window is fetched to limit+offset
+            from each type; clamping would silently return a page from
+            further up the queue than the caller asked for, which on a
+            review queue means showing events they have already dealt
+            with.
+      responses:
+        '200':
+          description: The page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AnomalyList' }
+        '400':
+          description: >
+            A status that is not one of the three, or a limit + offset
+            beyond what the merge can fetch.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: not_configured — the router was built without the audit or review store.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/anomalies/{eventID}:
+    put:
+      summary: Record what an operator decided about a flagged event
+      description: >
+        Admin only — an operator's token. Records a judgement against one
+        audit event, keyed on the event's own id, which is what a console
+        has in hand and what the engine's record is filed under.
+
+        This write takes no action on any account, and that is the point
+        rather than an omission. Confirming an event records that a
+        person judged it real: no account is locked, no session is
+        revoked, no threshold is tuned. There is no machinery in this API
+        that acts on an account beyond what an operator does by hand, and
+        putting one behind a "confirm" button is exactly the automatic
+        action the read-only rule forbids. This endpoint is a console
+        action or it does not happen.
+
+        The judgement is stored in this API's own table, never written
+        into the engine's audit history — the event reads exactly the
+        same before and after. There is no DELETE: "actually, never mind"
+        is status=unreviewed, which keeps the row and its attribution,
+        because the record that somebody looked and thought better of it
+        is worth more than the tidier table a delete would leave.
+
+        The response is the review alone, not the whole queue row.
+        Re-reading the event would need a lookup by event id and the
+        engine has none — events are fetched by type — so a save returns
+        the decision rather than pretending to return the row it belongs
+        to, and a client refreshes the list it already has.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: eventID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AnomalyReviewInput' }
+      responses:
+        '200':
+          description: The recorded review
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AnomalyReview' }
+        '400':
+          description: >
+            invalid_review_status for a status that is not one of the
+            three, invalid_review_note for a note over 500 characters, or
+            a body with no status field.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: >
+            audit_event_not_found — there is no audit event with that id,
+            so there is nothing to review. Also answered for a path
+            segment that cannot be an event id at all, since a malformed
+            uuid handed to Postgres is a driver error that would surface
+            as a 500; and not_configured when the review store is absent.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }

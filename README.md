@@ -161,13 +161,25 @@ POST   /v1/api-keys                  (auth required, raw key returned once)
 GET    /v1/api-keys                  (auth required)
 DELETE /v1/api-keys/{keyID}          (auth required)
 
-GET    /v1/admin/oauth/health        (admin required)
+GET    /v1/admin/oauth/health             (admin required)
 GET    /v1/admin/security/hash-migration  (admin required)
+GET    /v1/admin/security/mfa-adoption    (admin required)
+GET    /v1/admin/users                    (admin required)
+GET    /v1/admin/users/{userID}           (admin required)
 GET    /v1/admin/users/{userID}/metadata  (admin required)
 PUT    /v1/admin/users/{userID}/metadata/{key}     (admin required)
 DELETE /v1/admin/users/{userID}/metadata/{key}     (admin required)
-GET    /v1/admin/webhooks/deliveries (admin required)
-GET    /v1/admin/logging/recent      (admin required)
+GET    /v1/admin/anomalies                (admin required)
+PUT    /v1/admin/anomalies/{eventID}      (admin required)
+GET    /v1/admin/webhooks/deliveries      (admin required)
+GET    /v1/admin/logging/recent           (admin required)
+GET    /v1/admin/digest                   (admin required)
+GET    /v1/admin/digest/history           (admin required)
+GET    /v1/admin/support/diagnose         (admin required)
+GET    /v1/admin/config-tuning            (admin required)
+GET|PUT|DELETE /v1/admin/settings/llm-provider        (admin required)
+GET|PUT|DELETE /v1/admin/settings/database-provider   (admin required)
+GET|PUT|DELETE /v1/admin/settings/ask-ai-widget       (admin required)
 ```
 
 `GET /v1/sessions` answers with *named* sessions: each entry keeps its `id`, `ip`, `user_agent` and `created_at`, and gains `label`, `device` and `location`, all computed on read from the session's own IP and User-Agent — nothing new is stored and no migration exists for it. `label` is the string a "your devices" screen shows (`Chrome on macOS`, or `Unknown device` for a client that sent no User-Agent). `location` is present but empty unless a geolocator is configured, and this repo wires none on purpose: every implementation of that interface calls somebody else's internet service, which is a deployment's decision rather than this repo's. The response shape is documented in `openapi/spec.yaml`.
@@ -245,6 +257,65 @@ Set `PASSWORD_HASHER=argon2id` and every login whose stored hash is out of date 
 - The text is the engine's, passed through verbatim. This repo does not reformat a report it does not own — and `email` is echoed alongside it so an agent working through a queue can see which address was answered.
 - **Read-only structurally, not by convention.** The report is built through interfaces carrying no `LockAccount`, `ResetFailedAttempts` or `Revoke`, so the endpoint cannot unlock the very account it is describing, whatever the caller asks for. That is cryden's design and this repo adds nothing on top of it.
 - A missing `email` is a `400`, not a diagnosis of the empty string — which would come back as "no account exists", an answer to a question nobody asked.
+
+`GET /v1/admin/security/mfa-adoption` reports second-factor enrolment the same way, from the engine's own audit events:
+
+```json
+{"data": {
+  "total_users": 1234,
+  "window_days": 7,
+  "factors": [
+    {"factor": "totp", "enrolled_events": 300, "removed_events": 40,
+     "enrolled_events_in_window": 12, "removed_events_in_window": 3},
+    {"factor": "passkey", "enrolled_events": 90, "removed_events": 2,
+     "enrolled_events_in_window": 7, "removed_events_in_window": 0}
+  ]
+}}
+```
+
+**It is not "N of M users have MFA", and that is not an oversight.** cryden cannot be asked how many accounts have a factor enrolled: `TOTPStore` and `WebAuthnCredentialStore` are per-user (`GetByUserID`, `ListByUser`) with no `Count` and no `ListAll`. Counting the rows in `totp_secrets` from here would answer it exactly and would also be this repo writing SQL against the engine's own schema — the boundary drawn in [Design notes](#design-notes). So the report gives what the engine does record system-wide, and names every field accordingly:
+
+- **Every field counts events, not users.** A user who turns TOTP on, loses their phone and turns it off contributes one enrolment and one removal and is enrolled zero times over. `enrolled_events` is not an adoption figure, and no percentage is derived from it anywhere in the API — a ratio of events to `total_users` would look like coverage and move for the wrong reasons.
+- **The pair against each other is the honest read.** A factor whose removals keep pace with its enrolments is churning; the windowed pair says whether that is happening now.
+- **Recovery codes are not in the list.** They are a fallback for an account that already has a second factor, not a factor of their own, so counting `recovery_codes_generated` as enrolment would report a different thing than the label says.
+- Both factors are always present, including at zero. A report that omitted a factor with no events would leave a console unable to tell "nobody has enrolled" from "this deployment does not support it".
+
+## The user surface
+
+Two endpoints, both read-only, for the console's account screen:
+
+```
+GET /v1/admin/users?q=&limit=&offset=      # exact-email lookup, or browse
+GET /v1/admin/users/{userID}               # one account, its sessions, its history
+```
+
+This is the one place in this API where an operator can see an account that is not their own, so what is *not* here matters as much as what is. There is no lock, no unlock, no password reset and no delete. cryden's store exposes `LockAccount`, and wiring it to a button would make this repo the thing that can lock somebody out of their account; an operator who needs that has the engine's own admin path, not an HTTP endpoint this repo invented. The detail view reports lockout state so it can be diagnosed, and stops there.
+
+- **The email search is exact and case-sensitive, and the response says so.** `q` goes to `cryden.GetUser`, which is `WHERE email = $1` — cryden stores addresses exactly as typed and has no `citext`, so `Alice@example.com` does not find an account created as `alice@example.com`. Every response carries `match: "exact_email"` or `"browse"` so a console can label the result and explain a zero-result search, rather than leaving an operator to conclude the account is gone. A search that finds nothing is an empty `200`, never a `404` — answering `404` would make a console render "error" for the most ordinary outcome a search has.
+- **There is no partial search, deliberately.** A `LIKE` against cryden's `users` table would cross the ownership boundary this repo keeps everywhere else: the engine owns that table, and a query written here would be a second, silent definition of what a user is. If partial search is wanted later, it is its own deliberate piece of work.
+- **`locked` is computed, not mirrored.** cryden clears a lockout by time passing rather than by writing a null, so a row can carry a `locked_until` already in the past — reporting `locked: true` for a non-nil column would tell an operator an account is locked out when it is not, and the ones that look like that are exactly the ones somebody just waited out.
+- **Sessions are counted, not listed.** `active_sessions` is a number. cryden's `ListByUser` returns only live sessions, so the count is honest; listing them would publish every IP and user agent an account has signed in from to anyone holding an operator token. The support assistant's report makes the same choice for the same reason.
+- **`PasswordHash` is on the struct these are built from and never on the wire.** A struct tag is not a guarantee, so a test asserts against the raw response body for any hash-shaped field — and proves the assertion is not vacuous by confirming the stored user really does have one.
+
+## Flagged-event review queue
+
+`GET /v1/admin/anomalies` is the queue of what the engine flagged, and `PUT /v1/admin/anomalies/{eventID}` is where an operator records what they decided about it:
+
+```
+GET /v1/admin/anomalies?status=&limit=&offset=
+PUT /v1/admin/anomalies/{eventID}   {"status": "confirmed", "note": "real, from the office VPN"}
+```
+
+The queue is the two event types cryden writes when a login looks *wrong* rather than merely failing — `anomaly_detected` and `credential_stuffing_detected` — merged newest first, each carrying its review. Both carry a `signals` key naming what tripped, which is what makes them reviewable: an operator can read the event and form a judgement. Widening this to the failure events around them (`login_failed`, `token_reuse_detected`) would not make a bigger queue, it would make the audit table the queue.
+
+- **A review is a row in this repo's own table, keyed on the audit event id.** The event the engine recorded reads exactly the same before and after — nothing here rewrites cryden's audit history. The id is what a console has in hand and what the engine's record is filed under.
+- **Nothing deletes.** Dismissing is a status, not a removal, and withdrawing a judgement stores `unreviewed` rather than dropping the row — so the record that somebody looked, and who they were, survives the change of mind. See `anomalyreview`'s package doc.
+- **Confirming takes no action.** Marking an event real records the judgement and nothing else: no account is locked, no session revoked, no threshold tuned. There is no machinery in this repo that acts on an account beyond what an operator does by hand, which is exactly what keeps this on the right side of the read-only rule rather than being an exception to it.
+- **An event that does not exist is refused, not stored.** cryden has no lookup by event id, so Go cannot check that a flagged event is real — the table does it instead, with a foreign key from `reviewed_anomalies.event_id` to `audit_events.id` and a clean `404 audit_event_not_found` from the resulting SQLSTATE. A console acting on a stale list is told rather than shown a success that annotates nothing.
+- **`status=unreviewed` matches an event with no row at all.** The two are the same thing by design, so the filter compares against the default the response reports rather than against what the store happened to return — otherwise the one tab an operator opens first would be empty.
+- **Paging is refused past what the merge can fetch.** cryden's per-type search takes a limit and no offset, so the merged window is fetched to `limit + offset` from each type and sliced here. That makes each page an exact prefix of the queue rather than a sample of it — but `limit + offset` beyond 500 is a `400`, not a silent clamp, because a clamped offset would return a page from further up the queue than the caller asked for, which on a review queue means showing events they have already dealt with.
+- **`has_more` means "this page came back full, ask again", not "there is more".** Deciding the latter exactly would mean knowing the queue's total size and the fetches give a window per type, so the endpoint says what it can support. A page short of `limit` *is* the end, precisely because the merged window is an exact prefix.
+- **The response to a save is the review alone, not the queue row.** Re-reading the event would need a lookup by event id that the engine does not have, so a save returns the decision and a client refreshes the list it already has.
 
 ## API keys
 
@@ -380,7 +451,7 @@ GET|PUT|DELETE /v1/admin/settings/database-provider
 GET|PUT|DELETE /v1/admin/settings/ask-ai-widget
 ```
 
-These are the admin surface's **only** writes, and they are the other half of the read-only rule rather than a hole in it. A tuning suggestion pre-fills one of these forms; an operator presses save; this is what handles that save. No AI-assisted handler in this repo holds a reference to any of them, and none accepts a suggestion as input.
+These are one of the admin surface's three write blocks, and they are the other half of the read-only rule rather than a hole in it. A tuning suggestion pre-fills one of these forms; an operator presses save; this is what handles that save. No AI-assisted handler in this repo holds a reference to any of them, and none accepts a suggestion as input.
 
 All three answer `404 not_configured` when `SETTINGS_ENCRYPTION_KEY` is unset — without a key there is nowhere safe to put a credential, so the API refuses rather than storing one in the clear.
 
@@ -421,8 +492,8 @@ The LLM API key and the database connection string are sealed with **AES-256-GCM
 - A paused login is a `200`, not an error: nothing failed, the caller just has one more step. `httpapi/second_factor.go` is the one place that response shape is written.
 - `DELETE /v1/passkeys/{credentialID}` takes a JSON body (`{"password": "..."}`) — the password is re-confirmation, so a stolen access token alone cannot weaken an account's own auth requirements.
 - Passkey ceremony options and the browser's credential response travel as raw JSON (an object, not a JSON-encoded string), since that is exactly what `navigator.credentials.create()`/`.get()` produce and consume.
-- **Five of this repo's tables are not cryden's and never will be**: `user_metadata`, `webhook_deliveries`, `shipped_log_events`, `digest_runs` and `settings`. cryden calls an interface and moves on; it keeps no queryable history of what a sender or a logger did, no schedule, no run record, and no configuration storage — and `store.User` has no metadata concept on purpose. Each lives in its own package (`usermeta/`, `webhook/`, `shiplog/`, `digest/`, `settings/`) with a Postgres store and an in-memory double behind one interface, mirroring the `store/interfaces.go` + `store/memory` + `store/postgres` split cryden itself uses — which is what makes an endpoint over them testable with no database.
-- **The admin surface is read-only by default, and every write on it is a named exception.** `GET /v1/admin/webhooks/deliveries` and `GET /v1/admin/logging/recent` report; neither offers a "retry this delivery" button, a "replay this event", or any way to write a log record or a delivery row. That is the same rule cryden's AI admin tools are built under, carried across the repo boundary: an operator reads the state of the system, and every change to it goes through the explicit path that owns that change (or through the receiving system, for a delivery). Adding a write here is a design change, not a convenience, and there are exactly two of them. `PUT`/`DELETE /v1/admin/users/{userID}/metadata/{key}` writes per-user metadata, which becomes JWT claims — the write *is* the feature, and a read-only version of it would do nothing. `PUT`/`DELETE /v1/admin/settings/*` is a settings save, the "a human still saves it" half of the pre-fill rule, not an action any AI tool can reach; its credentials are encrypted at rest and it is the only place in this API that stores one. Both are an operator acting deliberately on a named thing, and neither is reachable from an AI feature — no tool holds a reference to either handler, and the engine's interfaces carry no method that could call one. If you are adding a write under `/v1/admin` that is neither of these, the answer is no.
+- **Six of this repo's tables are not cryden's and never will be**: `user_metadata`, `webhook_deliveries`, `shipped_log_events`, `digest_runs`, `settings` and `reviewed_anomalies`. cryden calls an interface and moves on; it keeps no queryable history of what a sender or a logger did, no schedule, no run record, no configuration storage, and no record of a person having read one of its events — and `store.User` has no metadata concept on purpose. Each lives in its own package (`usermeta/`, `webhook/`, `shiplog/`, `digest/`, `settings/`, `anomalyreview/`) with a Postgres store and an in-memory double behind one interface, mirroring the `store/interfaces.go` + `store/memory` + `store/postgres` split cryden itself uses — which is what makes an endpoint over them testable with no database. `reviewed_anomalies` is the one that carries a foreign key back into cryden's schema (`event_id → audit_events(id)`), deliberately: it is the only way this repo can tell a real flagged event from a fabricated id, since the engine has no lookup by event id.
+- **The admin surface is read-only by default, and every write on it is a named exception.** `GET /v1/admin/webhooks/deliveries` and `GET /v1/admin/logging/recent` report; neither offers a "retry this delivery" button, a "replay this event", or any way to write a log record or a delivery row. That is the same rule cryden's AI admin tools are built under, carried across the repo boundary: an operator reads the state of the system, and every change to it goes through the explicit path that owns that change (or through the receiving system, for a delivery). Adding a write here is a design change, not a convenience, and there are exactly three of them. `PUT`/`DELETE /v1/admin/users/{userID}/metadata/{key}` writes per-user metadata, which becomes JWT claims — the write *is* the feature, and a read-only version of it would do nothing. `PUT /v1/admin/anomalies/{eventID}` records an operator's judgement about an event the engine flagged, keyed on the audit event id; it takes no action on any account, which is why it is a record rather than an exception. `PUT`/`DELETE /v1/admin/settings/*` is a settings save, the "a human still saves it" half of the pre-fill rule, not an action any AI tool can reach; its credentials are encrypted at rest and it is the only place in this API that stores one. All three are an operator acting deliberately on a named thing, and none is reachable from an AI feature — no tool holds a reference to any of these handlers, and the engine's interfaces carry no method that could call one. If you are adding a write under `/v1/admin` that is none of these, the answer is no.
 - `webhook_deliveries.id` is a `BIGSERIAL` surrogate key rather than the natural key you might expect. The event id it corresponds to **can be empty** — cryden generates it with `crypto/rand` and deliberately delivers an event without one rather than dropping it — and a delivery log whose primary key could be blank is a log that loses exactly the rows you would most want to see. The engine's own id is recorded beside it as `event_id` and is used for the receiver's idempotency.
 - This repo has **no graceful shutdown**, and as of this tier that is a stated gap rather than an unnoticed one: `main.go` ends at `log.Fatal(http.ListenAndServe(...))`, so the webhook worker's context is never cancelled and the shipped-events sink has no flush-and-exit path. Both were built so that adding one later is a change to `main.go` alone — the worker takes a `context.Context`, which today is `context.Background()`. The sink writes synchronously for the same reason: a buffered sink with no shutdown path drops its last records on a crash.
 
