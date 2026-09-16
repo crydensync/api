@@ -235,6 +235,17 @@ Set `PASSWORD_HASHER=argon2id` and every login whose stored hash is out of date 
 - `estimated_remaining` is therefore *estimated*, floored at zero, and is `total_users - upgraded_events`.
 - `upgraded_events_in_window` is the field that actually answers "is this draining": the all-time count only ever rises, while a windowed one falls to zero as the last stragglers log in. `window_days` (1–365, default 7) sets that window.
 
+`GET /v1/admin/support/diagnose?email=` answers the support ticket "why can't this person log in", from the account's own recorded history: whether it is locked and until when, its consecutive failed-attempt count, how many sessions it currently holds, and the recent failure-type events behind all of that, newest first.
+
+```json
+{"data": {"email": "dana@example.com", "text": "Login diagnosis for dana@example.com\n\nAccount is LOCKED until 14:32 UTC.\n5 consecutive failed attempts currently recorded…"}}
+```
+
+- **An unknown address is the answer, not a 404.** cryden's `admin.DiagnoseLogin` returns `Found: false` rather than an error, and the report says "No account exists for this email address." A 404 would be indistinguishable from a broken endpoint, and "you have the wrong address" is exactly what a support agent pasting a typo'd email needs to be told.
+- The text is the engine's, passed through verbatim. This repo does not reformat a report it does not own — and `email` is echoed alongside it so an agent working through a queue can see which address was answered.
+- **Read-only structurally, not by convention.** The report is built through interfaces carrying no `LockAccount`, `ResetFailedAttempts` or `Revoke`, so the endpoint cannot unlock the very account it is describing, whatever the caller asks for. That is cryden's design and this repo adds nothing on top of it.
+- A missing `email` is a `400`, not a diagnosis of the empty string — which would come back as "no account exists", an answer to a question nobody asked.
+
 ## API keys
 
 `POST /v1/api-keys` mints a machine-to-machine credential for the calling user and returns the raw key **once** — cryden stores only its SHA-256 hash and can never reproduce it, so a caller that loses it has to mint a new one. The response carries the raw key, the stored record (`id`, `name`, `prefix`, `scopes`, `expires_at`, `expired`, `created_at`, `last_used_at`) and a `notice` saying so; a client that renders the key without that notice is the failure this guards against.
@@ -315,6 +326,92 @@ There is no vendor here: this repo ships no SDK, so "shipped" means "recorded in
 - An unknown `level` is a `400` naming the four valid values, not an empty list — which is indistinguishable from "the engine has been quiet".
 - The write is **synchronous**, on the goroutine that logged. That is a real cost and is not the shape a busy deployment wants; it is the shape this one can have, because an asynchronous sink needs a flush policy and a shutdown path, and this repo has no graceful shutdown anywhere yet. A buffer that is never flushed on exit is a log that silently drops its last records before a crash, which for a log is the failure that matters most. `LOG_LEVEL` (default `info`) is what keeps the volume sane in the meantime, since the engine's debug records never reach the sink.
 
+## Config tuning advisor
+
+`GET /v1/admin/config-tuning?window_days=` reads the recent audit history, compares it against the settings **actually in force**, and returns the suggestions as a structured list — one object per knob, ready to render as a card:
+
+```json
+{"data": {
+  "since": "…", "until": "…", "window_days": 30,
+  "counts": {"account_locked": 5, "login_failed": 5},
+  "suggestions": [{
+    "area": "Lockout",
+    "finding": "5 accounts were locked out of 5 recorded in this window (100%) — LockoutThreshold is currently 5, LockoutDuration 15m0s.",
+    "suggestion": "If most of these are real users mistyping a password rather than an attack, consider raising LockoutThreshold…"
+  }]
+}}
+```
+
+- **There is no write path, and there is not going to be one.** No parameter changes a setting, and no counterpart endpoint applies a suggestion. The decision recorded for this surface is **pre-fill, never auto-apply**: a suggestion pre-fills the settings field it concerns, and a human still saves that change through the ordinary settings path. An endpoint that wrote a suggested value straight into live config would be the violation `CLAUDE.md`'s hard rule names, and would let a bad suggestion change production with no confirmation. The route accepts `GET` and nothing else.
+- It calls `admin.BuildTuningReport` **directly**, not the flattened `cryden.ConfigTuningReport` text helper. The text is right for a CLI and wrong for a console: a pre-rendered blob cannot become one card per suggestion, and a client would be back to parsing English to find which knob a paragraph was about.
+- `counts` is the raw audit evidence the suggestions were computed from, including event types cryden does not define — so a console can show the numbers rather than asking an operator to trust a sentence.
+- Every value in the report comes from the config this process built the engine from, never a second reading of the environment. `UsingDefaultRateLimiter` is derived from `RedisURL` being empty — the same condition `main.go` uses to build the Redis limiter — so the report and the wiring cannot drift.
+- `window_days` (1–365) defaults to cryden's own **30**-day tuning window, deliberately wider than the digest's week: a config knob should be judged against a month of traffic, not whatever happened this week.
+- The password-strength finding always says the breach checker is not set. That is **accurate rather than a stub**: this repo has never wired `Config.BreachedPasswordChecker`, because cryden ships no implementation and every real one calls somebody else's corpus.
+
+`LOCKOUT_THRESHOLD` and `LOCKOUT_DURATION_MINUTES` (defaults 5 and 15 minutes) are passed through to the engine explicitly, for the two reasons above at once: cryden reads them straight off its config with no defaulting, so a deployment that left them implicit was running a lockout that could never actually trigger; and the tuning report describes the settings in force, so it should not have to guess what the engine was handed.
+
+## Weekly digest
+
+Two endpoints, and only one of them depends on any configuration:
+
+```
+GET /v1/admin/digest?window_days=            # built now, records nothing
+GET /v1/admin/digest/history?limit=          # what the schedule recorded
+```
+
+`GET /v1/admin/digest` returns `cryden.DigestSince`'s report verbatim — the text is the engine's, and this repo does not reformat a report it does not own — alongside `since` and `until`, because a client should not have to parse English out of a digest to learn what it covers. `window_days` (1–365, default 7) is passed to the engine rather than implemented here; the seven-day default is what makes it a *weekly* digest. **Asking twice leaves no trace**: the endpoint records nothing, and if that ever stopped being true an operator could no longer tell what the schedule produced from what somebody happened to open.
+
+Setting `DIGEST_INTERVAL_HOURS` (168 is weekly) turns on the schedule: a background job calls the same report every N hours and writes the rendered result to the `digest_runs` table, which `GET /v1/admin/digest/history` lists newest first. Unset means no schedule — no goroutine runs, nothing is written, and the history endpoint answers `404 not_configured` rather than an empty list an operator would read as "nothing has ever happened".
+
+- **cryden has no scheduling concept.** `WeeklyDigest`/`DigestSince` build a report on demand and return a string; there is no run record and nothing that remembers a digest was ever generated. So the table, the job and the history endpoint are entirely this repo's own.
+- **The row is the report, not a recipe for one.** The rendered text is stored rather than the counts behind it, because a digest covers a window that has *ended*: re-running its query later would not reproduce it, since "the last seven days" is anchored to when it was built.
+- **The first run is one full interval after startup**, not at boot. A process that restarts more often than the interval elapses — a crashloop, a deploy pipeline, a laptop — would otherwise write one row per restart, and a history that grows with restarts rather than with time is not a history of anything.
+- A failed run is **logged and swallowed**. This runs in a goroutine with nobody to hand an error to, and a scheduler that stopped at the first database blip would silently stop producing digests for the rest of the process's life.
+- Nothing on the HTTP surface can create a digest run. Only the scheduler writes, and it is a process component rather than a request handler — the read-only rule the whole admin surface follows.
+
+## AI provider settings
+
+The AI-assisted admin features need two things only this repo can supply, because cryden defines them as interfaces the host implements: an `ai.LLMProvider` that turns a question into a `QueryIntent`, and an `ai.QueryableStore` that runs one. Three settings endpoints configure them, all operator-only:
+
+```
+GET|PUT|DELETE /v1/admin/settings/llm-provider
+GET|PUT|DELETE /v1/admin/settings/database-provider
+GET|PUT|DELETE /v1/admin/settings/ask-ai-widget
+```
+
+These are the admin surface's **only** writes, and they are the other half of the read-only rule rather than a hole in it. A tuning suggestion pre-fills one of these forms; an operator presses save; this is what handles that save. No AI-assisted handler in this repo holds a reference to any of them, and none accepts a suggestion as input.
+
+All three answer `404 not_configured` when `SETTINGS_ENCRYPTION_KEY` is unset — without a key there is nowhere safe to put a credential, so the API refuses rather than storing one in the clear.
+
+### Credentials
+
+The LLM API key and the database connection string are sealed with **AES-256-GCM before they reach the table**, keyed from `SETTINGS_ENCRYPTION_KEY`. Treat it like `JWT_SECRET`: set it, keep it out of source control, and expect a rotation to need the old value for as long as rows written under it exist.
+
+- **Separate from cryden's `ENCRYPTION_KEY` on purpose.** The two seal different things with different lifetimes — cryden's covers what the engine stores (TOTP secrets), this one covers what the API stores — so one leaking or rotating need not touch the other. Same reasoning as `CLOUD_LOG_HASH_KEY`.
+- **Never returned, in any form.** Not masked, not truncated to the last four characters: `api_key_set` and `dsn_set` booleans are what a console renders "saved" from, and returning any part of the value would put it in a browser's memory and a devtools panel. `GET` on the database provider returns the host and database name only, so an operator can tell which connection is stored without being shown a password.
+- **A changed key is `409 setting_undecryptable`, not `404`.** The row is still there, and reporting it as missing would send an operator to re-enter a credential that is fine. `DELETE` needs no key at all, which is what makes it the way out for a deployment that has lost one.
+- **The credential is required on every `PUT`**, rather than optional with "blank means keep the existing one". That convention is the usual one and it is wrong here: an omitted field and a deliberately cleared one would be the same request, and getting it wrong means a form that appears to save a key while silently storing an empty one.
+
+### The read-only database requirement
+
+`PUT /v1/admin/settings/database-provider` **connects with the supplied credentials and attempts a write before storing anything.** cryden's own position is that for this feature "the credential boundary, not just the allowlist, is the real safety guarantee" — a role that cannot `INSERT` cannot `INSERT` whatever the query builder does with its input. So the order is: validate the shape, prove the role cannot write, and only then store.
+
+- **An attempted write, not a reading of the role's attributes.** A role with `rolsuper` set, or a connection string containing the word "readonly", or a "read-only?" checkbox in the console, are all claims. Only the server's refusal is evidence, and it is evidence about the actual role, on the actual database, through the actual credentials. It cannot be done client-side either — a browser cannot open a Postgres connection.
+- **The probe writes to `pg_temp`**, the session's own temporary schema. The table lives only for the life of that connection and is dropped when it closes, so a probe that fails leaves nothing for an operator to clean up. The pool is capped at one connection so the `CREATE` and the `INSERT` share the session that owns the temp table — a pool that split them would have the `INSERT` fail on a missing table, which looks like a refusal and is not one.
+- **Three outcomes, deliberately distinct.** A refused write is a pass. A successful write is `400 database_role_not_read_only`. Anything else — no connection, a timeout, a `CREATE` that failed for a reason other than privilege — is `400 database_role_unverified`, **which is not a pass**. Treating "could not find out" as success would make the check pass exactly when it is least able to tell. Only Postgres' own SQLSTATE `42501` (`insufficient_privilege`) counts as a refusal, and it is matched by code rather than by message, since the message is localized and reworded between major versions.
+- **It is slower than its neighbours**, because it opens a connection and runs statements before answering, bounded by a ten-second timeout. That is paid once per save, not per query.
+
+### The ask-ai widget
+
+`GET|PUT /v1/admin/settings/ask-ai-widget` stores the widget's enabled flag, the origins allowed to embed it, the entities it answers over, and its copy. It is the one setting here that is **not** a credential, so there is nothing to redact.
+
+- **`entities` has teeth.** cryden's `widget.Ask` force-scopes every parsed intent to the calling end user's own rows — it discards whatever identity filter the model produced and substitutes the real one, rather than validating and rejecting, so there is no oracle — but it scopes over the whole of `ai.AllowedEntities`. Narrowing that further is a host decision, so `aiprovider.ScopedProvider` enforces the configured subset in front of the provider. A scope setting nothing consulted would be worse than no setting at all. The list is validated against cryden's own allowlist rather than a copy of it.
+- **`"*"` as an origin is refused by name**, with the reason in the message: this widget answers questions about the signed-in user's sessions and audit events, so a wildcard origin would let any page on the internet ask them through a visitor's browser.
+- **The refusal names neither the entity nor the scope.** That error reaches an end user through the widget; listing the configured entities would be describing the console's schema to whoever is typing questions at it.
+- **A disabled widget may be otherwise empty**, so switching the feature off does not require filling in fields that are about to stop mattering. Anything that *is* filled in is still validated, so a form cannot store a value that was never checked and would be rejected the moment it was switched on.
+- **No embed snippet is returned.** The snippet is markup the console renders into its own pages, and the URL in it would name an endpoint this API does not serve yet — returning one would hand the console a script tag pointing at a 404. What this endpoint owes the console is the configuration a snippet is built from.
+
 ## Design notes
 
 - `CORS_ORIGINS` is required, no wildcard default — an API handling auth tokens should never allow every origin.
@@ -324,8 +421,8 @@ There is no vendor here: this repo ships no SDK, so "shipped" means "recorded in
 - A paused login is a `200`, not an error: nothing failed, the caller just has one more step. `httpapi/second_factor.go` is the one place that response shape is written.
 - `DELETE /v1/passkeys/{credentialID}` takes a JSON body (`{"password": "..."}`) — the password is re-confirmation, so a stolen access token alone cannot weaken an account's own auth requirements.
 - Passkey ceremony options and the browser's credential response travel as raw JSON (an object, not a JSON-encoded string), since that is exactly what `navigator.credentials.create()`/`.get()` produce and consume.
-- **Three of this repo's tables are not cryden's and never will be**: `user_metadata`, `webhook_deliveries`, `shipped_log_events`. cryden calls an interface and moves on; it keeps no queryable history of what a sender or a logger did, and `store.User` has no metadata concept on purpose. Each lives in its own package (`usermeta/`, `webhook/`, `shiplog/`) with a Postgres store and an in-memory double behind one interface, mirroring the `store/interfaces.go` + `store/memory` + `store/postgres` split cryden itself uses — which is what makes an endpoint over them testable with no database.
-- **The admin surface is read-only by construction.** `GET /v1/admin/webhooks/deliveries` and `GET /v1/admin/logging/recent` report; neither offers a "retry this delivery" button, a "replay this event", or any way to write a log record or a delivery row. That is the same rule cryden's AI admin tools are built under, carried across the repo boundary: an operator reads the state of the system, and every change to it goes through the explicit path that owns that change (or through the receiving system, for a delivery). Adding a write here is a design change, not a convenience.
+- **Five of this repo's tables are not cryden's and never will be**: `user_metadata`, `webhook_deliveries`, `shipped_log_events`, `digest_runs` and `settings`. cryden calls an interface and moves on; it keeps no queryable history of what a sender or a logger did, no schedule, no run record, and no configuration storage — and `store.User` has no metadata concept on purpose. Each lives in its own package (`usermeta/`, `webhook/`, `shiplog/`, `digest/`, `settings/`) with a Postgres store and an in-memory double behind one interface, mirroring the `store/interfaces.go` + `store/memory` + `store/postgres` split cryden itself uses — which is what makes an endpoint over them testable with no database.
+- **The admin surface is read-only by construction, with one named exception.** `GET /v1/admin/webhooks/deliveries` and `GET /v1/admin/logging/recent` report; neither offers a "retry this delivery" button, a "replay this event", or any way to write a log record or a delivery row. That is the same rule cryden's AI admin tools are built under, carried across the repo boundary: an operator reads the state of the system, and every change to it goes through the explicit path that owns that change (or through the receiving system, for a delivery). Adding a write here is a design change, not a convenience. **The exception is `/v1/admin/settings/*`**, which is a settings save — the "a human still saves it" half of the pre-fill rule, not an action any AI tool can reach. Its credentials are encrypted at rest, and it is the only place in this API that stores one. If you are adding a write under `/v1/admin` that is not a settings save, the answer is no.
 - `webhook_deliveries.id` is a `BIGSERIAL` surrogate key rather than the natural key you might expect. The event id it corresponds to **can be empty** — cryden generates it with `crypto/rand` and deliberately delivers an event without one rather than dropping it — and a delivery log whose primary key could be blank is a log that loses exactly the rows you would most want to see. The engine's own id is recorded beside it as `event_id` and is used for the receiver's idempotency.
 - This repo has **no graceful shutdown**, and as of this tier that is a stated gap rather than an unnoticed one: `main.go` ends at `log.Fatal(http.ListenAndServe(...))`, so the webhook worker's context is never cancelled and the shipped-events sink has no flush-and-exit path. Both were built so that adding one later is a change to `main.go` alone — the worker takes a `context.Context`, which today is `context.Background()`. The sink writes synchronously for the same reason: a buffered sink with no shutdown path drops its last records on a crash.
 

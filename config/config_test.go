@@ -44,6 +44,9 @@ var tieredEnvVars = []string{
 	"WEBHOOK_SECRET",
 	"WEBHOOK_EVENTS",
 	"WEBHOOK_MAX_ATTEMPTS",
+	"LOCKOUT_THRESHOLD",
+	"LOCKOUT_DURATION_MINUTES",
+	"DIGEST_INTERVAL_HOURS",
 }
 
 func loadForTest(t *testing.T, env map[string]string) (Config, error) {
@@ -398,5 +401,86 @@ func TestTier3WebhookMaxAttemptsIsBounded(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("WEBHOOK_MAX_ATTEMPTS=%s: error = %q, want it to contain %q", value, err, want)
 		}
+	}
+}
+
+// The Tier 4 defaults: cryden's own lockout numbers restated, because the
+// engine takes them straight off its config with no defaulting of its own
+// and both zero values are wrong in the same direction — a zero threshold
+// locks an account on its first failed password, a zero duration locks it
+// until an instant already past.
+func TestTier4DefaultsComeFromTheEngine(t *testing.T) {
+	cfg, err := loadForTest(t, nil)
+	if err != nil {
+		t.Fatalf("Load() failed with only the required vars set: %v", err)
+	}
+
+	if cfg.LockoutThreshold != 5 {
+		t.Errorf("LockoutThreshold = %d, want cryden's own default 5", cfg.LockoutThreshold)
+	}
+	if cfg.LockoutDuration != 15*time.Minute {
+		t.Errorf("LockoutDuration = %s, want cryden's own default 15m", cfg.LockoutDuration)
+	}
+	// Digests are opt-in: no schedule unless one was asked for, so an
+	// unconfigured deployment runs no goroutine and writes no rows.
+	if cfg.DigestInterval != 0 {
+		t.Errorf("DigestInterval = %s, want 0 (no schedule)", cfg.DigestInterval)
+	}
+}
+
+func TestTier4EnvOverridesLeaveOtherKnobsDefaulted(t *testing.T) {
+	cfg, err := loadForTest(t, map[string]string{
+		"LOCKOUT_THRESHOLD":        "9",
+		"LOCKOUT_DURATION_MINUTES": "45",
+		"DIGEST_INTERVAL_HOURS":    "168",
+	})
+	if err != nil {
+		t.Fatalf("Load() failed: %v", err)
+	}
+
+	if cfg.LockoutThreshold != 9 {
+		t.Errorf("LockoutThreshold = %d, want 9", cfg.LockoutThreshold)
+	}
+	if cfg.LockoutDuration != 45*time.Minute {
+		t.Errorf("LockoutDuration = %s, want 45m", cfg.LockoutDuration)
+	}
+	// A week in hours, which is the shape the env var is written in even
+	// though everything downstream holds a duration.
+	if cfg.DigestInterval != 168*time.Hour {
+		t.Errorf("DigestInterval = %s, want 168h", cfg.DigestInterval)
+	}
+	// Untouched knobs stay on their defaults.
+	if cfg.RateLimitAttempts != 10 || cfg.RateLimitWindow != time.Minute {
+		t.Errorf("rate limit = %d per %s, want the untouched default 10 per minute", cfg.RateLimitAttempts, cfg.RateLimitWindow)
+	}
+}
+
+// A lockout threshold below 1 and a negative digest interval are both
+// refused rather than read as "off": cryden has no way to switch account
+// lockout off, and treating a typo as the default is how a setting an
+// operator meant to change silently does nothing.
+func TestTier4UnusableKnobValuesAreStartupErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		env  map[string]string
+		want string
+	}{
+		{"threshold of zero", map[string]string{"LOCKOUT_THRESHOLD": "0"}, "LOCKOUT_THRESHOLD must be at least 1"},
+		{"negative threshold", map[string]string{"LOCKOUT_THRESHOLD": "-1"}, "LOCKOUT_THRESHOLD must be at least 1"},
+		{"non-numeric threshold", map[string]string{"LOCKOUT_THRESHOLD": "five"}, "LOCKOUT_THRESHOLD must be a number"},
+		{"non-numeric lockout duration", map[string]string{"LOCKOUT_DURATION_MINUTES": "quarter of an hour"}, "LOCKOUT_DURATION_MINUTES must be a number of minutes"},
+		{"negative digest interval", map[string]string{"DIGEST_INTERVAL_HOURS": "-1"}, "DIGEST_INTERVAL_HOURS cannot be negative"},
+		{"non-numeric digest interval", map[string]string{"DIGEST_INTERVAL_HOURS": "weekly"}, "DIGEST_INTERVAL_HOURS must be a number"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadForTest(t, tc.env)
+			if err == nil {
+				t.Fatalf("%v was accepted, want an error", tc.env)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.want)
+			}
+		})
 	}
 }

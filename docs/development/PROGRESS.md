@@ -35,14 +35,14 @@ Assumptions made, none blocking:
   operator all get the identical `403 not_operator` — that distinction
   is not something to expose to the caller.
 
-Next: Tier 1 (auth methods), each on its own branch per `CODEX.md`.
+Next: Tier 1 (auth methods), each on its own branch per `CLAUDE.md`.
 Copying cryden's migrations `0003`-`0007` into this repo (renumbered
 continuing from `003_operators`) is the first sub-step, before any
 TOTP/WebAuthn/magic-link/recovery-code endpoint work starts.
 
 ## 2026-09-14 — Tier 1 (auth methods) except Apple
 
-Branch `feat/tier1-auth-methods`, per `CODEX.md`'s one-branch-per-tier
+Branch `feat/tier1-auth-methods`, per `CLAUDE.md`'s one-branch-per-tier
 rule. First session in this repo with a working Go toolchain: Go 1.25.0
 plus cryden v2.5.0 and every dependency already in the module cache,
 so the caveat the Tier 0 entry left open is closed — `go mod tidy`
@@ -52,7 +52,7 @@ was verified: **the DB-backed smoke test was not run** (no Postgres and
 no network in this sandbox) and neither were the WebAuthn ceremonies,
 which need a real browser authenticator. Those still owe a first run
 against a real database. Saying that plainly here rather than counting
-green builds as "verified end to end", per `CODEX.md`.
+green builds as "verified end to end", per `CLAUDE.md`.
 
 Built, in commit order:
 
@@ -195,12 +195,12 @@ network), the DB-backed smoke test (no Postgres), and the WebAuthn
 ceremonies (no browser authenticator). Those remain the first things to
 run on a real deployment.
 
-Next: Tier 2, on its own branch per `CODEX.md` — and before or alongside
+Next: Tier 2, on its own branch per `CLAUDE.md` — and before or alongside
 it, the first DB-backed smoke-test run of everything in Tier 1.
 
 ## 2026-09-15 — Tier 2 (config, named sessions, OAuth health)
 
-Branch `feat/tier2-config-and-oauth-health`, per `CODEX.md`'s
+Branch `feat/tier2-config-and-oauth-health`, per `CLAUDE.md`'s
 one-branch-per-tier rule. Three commits, in order:
 
 - `feat: wire anomaly detection and the Redis rate limiter from env` —
@@ -319,7 +319,7 @@ rather than silently patched):
   smoketest does not have). An optional operator token/email flag would
   fix it if that coverage is wanted later.
 
-Next: Tier 3, on its own branch per `CODEX.md`. Still owed from before
+Next: Tier 3, on its own branch per `CLAUDE.md`. Still owed from before
 it: the first DB-backed smoke-test run, now worth doing against a
 `REDIS_URL`-less and a `REDIS_URL`-set instance so the shared limiter
 gets its first real exercise.
@@ -382,7 +382,7 @@ trailing `// dev stand-in` comments, which align against the longest
 line in their group. Both fixed with `gofmt -w`.
 
 **What was checked before the toolchain was reachable** — since
-`CODEX.md`'s rule is to say what was and was not done rather than to
+`CLAUDE.md`'s rule is to say what was and was not done rather than to
 imply a build — every cryden symbol Stage 1 calls was read directly out
 of the module cache at `…/cryden/v2@v2.5.0`, first-hand, not recalled.
 Confirmed:
@@ -626,7 +626,7 @@ so the field is `Errors`.
 
 ### Verification: what this does NOT cover
 
-Said plainly, per `CODEX.md`, rather than implied by a green suite:
+Said plainly, per `CLAUDE.md`, rather than implied by a green suite:
 
 - **There is no Postgres and no network in this sandbox.**
   `migrations/009`, `010` and `011` have **never been applied to a real
@@ -678,3 +678,330 @@ smuggled in behind the other.
 
 Tier 3 is complete. Next is Tier 4, which stays read-only by
 construction with the pre-fill-never-auto-apply decision already made.
+
+## 2026-09-15 — Tier 4, Stage 1 (digest, support diagnosis, config tuning)
+
+Tier 4 is split for the same reason Tier 3 was: the first half is three
+read-only reports with their decisions already made in `NEXT.md`, and
+the second half needs two decisions that are not this session's to
+make (see "Stage 2" below). Branch `feat/tier4-ai-admin-endpoints`.
+
+Three commits, one logical step each: the digest and its history
+(`21ac94c`), the support-ticket login diagnosis (`705b820`), and the
+config tuning advisor (`d74d8a4`).
+
+What each one is, and the one thing about it worth knowing:
+
+- **`GET /v1/admin/digest`** and **`GET /v1/admin/digest/history`**.
+  `digest/` is a new repo-owned package (interface + `PostgresStore` +
+  in-memory double in one file, the convention every store here
+  follows) over `migrations/012_digest_runs`. The on-demand endpoint
+  **records nothing**: an operator hitting it twenty times should not
+  fill a history with twenty near-identical reports, so only the
+  scheduled job writes. The schedule is this repo's own — cryden has no
+  concept of one — and the first run lands one full interval after
+  startup, not at boot, because a process that restarts more often than
+  the interval elapses would otherwise write a row per restart.
+- **`GET /v1/admin/support/diagnose?email=`** → `cryden.DiagnoseLoginIssue`.
+  An unknown account is an **answer** (`Found:false`), not a 404 or a
+  500: "we have never seen this address" is exactly what a support
+  ticket needs to be told, and dressing it up as a server error would
+  hide it.
+- **`GET /v1/admin/config-tuning`** → `admin.BuildTuningReport` called
+  **directly**, not `cryden.ConfigTuningReport`. The structured
+  `TuningSuggestion{Area, Finding, Suggestion}` list is the point: a
+  console renders one card per suggestion, and a pre-rendered text blob
+  cannot be turned back into cards. The counts are returned raw
+  alongside, so the evidence is visible rather than a sentence asking
+  to be trusted.
+
+### The lockout passthrough is a behaviour change, not a tidy-up
+
+Building the tuning advisor surfaced something: **this repo was never
+passing `LockoutThreshold`/`LockoutDuration` to the engine.** `config`
+had no such fields, so `main.go` left them at Go's zero values, so the
+engine ran with a threshold of 0 and a duration of 0 — and cryden does
+no defaulting of either. A zero threshold locks an account on its very
+first failed password; a zero duration locks it until an instant
+already past, which is to say not at all. Every deployment of this API
+so far has been in that second state.
+
+The report is what made it visible: `BuildTuningReport` is asked to
+judge the audit history against "the settings in force", and the
+settings in force were not what anyone thought they were. So `config`
+gained `LockoutThreshold`/`LockoutDuration` (defaulting to cryden's own
+5 and 15 minutes, with the values written down here for the same reason
+the rate-limit bounds are), `main.go` passes them, and a threshold
+below 1 is a **startup error** rather than being read as "off" —
+cryden has no way to switch lockout off, so accepting 0 would be
+accepting a setting that means something else.
+
+This is called out in `README.md`, `.env.example` and the commit
+message because it changes what every existing deployment does the next
+time it restarts. It is the right direction — an account that can be
+guessed at forever was not a design decision anyone made — but it is a
+change nobody asked for, and burying it in a commit about a reporting
+endpoint would have been the wrong way to ship it.
+
+### Verification: what this does NOT cover
+
+- **`migrations/012_digest_runs` has never been applied to a
+  database**, the same as `009`–`011`. Everything above is tested
+  through the in-memory doubles.
+- **`digest.PostgresStore`'s `List` has not been run.** Its limit
+  clamp is asserted through the in-memory double and through
+  `ClampLimit` directly, which is the shared rule — but the SQL that
+  applies it is a copy of a design, not a verified query. The
+  TIMESTAMPTZ round trip in particular cannot be reproduced by a double
+  that stores `time.Time` as `time.Time`.
+- **`memory.AuditStore` stamps `time.Now()` with no injectable clock**,
+  so window-*boundary* exclusion cannot be driven through the endpoint.
+  The digest and tuning tests assert the positive direction (events
+  recorded moments ago do appear inside a one-day window) and the text
+  the engine actually renders, rather than backdating an event.
+- **The digest schedule is a goroutine on `context.Background()`.** The
+  scheduler takes a `context.Context` and is tested with a real
+  cancellable one, but `main.go` has nothing to cancel it with, because
+  this repo still has no graceful shutdown — the debt Stage 1 of Tier 3
+  flagged, now with one more holder.
+- **No live LLM call and no live database provider exist to test**,
+  because Stage 2 is not built. Nothing in Stage 1 touches
+  `ai.LLMProvider` or `ai.QueryableStore`.
+- **`internal/smoketest` still has never been run** against a database,
+  unchanged from every previous tier's note.
+
+### Stage 2, and the two decisions it needs
+
+Stage 2 is the LLM provider config, the database provider config and
+the ask-AI widget config. `NEXT.md` settles the shape of all three
+(settings endpoints, this repo's own config table, pre-fill never
+auto-apply, validate the read-only role by attempting a write). Two
+things it does not settle, both of which change what gets built:
+
+1. **Whether this repo ships a live LLM client at all.** `ai.LLMProvider`
+   is an interface; implementing it against a real vendor means an
+   outbound HTTP client, a vendor choice, and a credential that leaves
+   the building. A console that configures a provider it cannot call is
+   not useful, so this is likely yes — but it is an integration
+   decision, not a wrapper decision, and this repo has so far shipped
+   no outbound integration of its own (the webhooks are cryden calling
+   a URL this repo hands it).
+2. **Where the at-rest encryption key comes from.** `NEXT.md` requires
+   the stored provider credential be encrypted at rest and treated with
+   the same care as `JWT_SECRET`. `ENCRYPTION_KEY` already exists and
+   already encrypts TOTP secrets, so reusing it is the obvious
+   candidate — but reusing one key across two purposes is a decision
+   with a blast radius, and the alternative (a second key, or a KMS)
+   is a deployment change.
+
+Both were left for the user rather than guessed at.
+
+### Noticed while working, not fixed
+
+- **`openapi/spec.yaml` is now at 1.4 and covers Tiers 1–4 Stage 1**,
+  which closes the gap every previous entry flagged — `NEXT.md`'s Tier 1
+  note that the spec "still predates Tier 1" is no longer true. The
+  document is large and hand-maintained, so it can drift again.
+- **The unconfigured-store answer is still `404 not_configured`**, now
+  used by the digest history and the tuning endpoint too. Consistent
+  with every other unconfigured feature here, and still
+  indistinguishable from "this resource genuinely does not exist".
+- **`config.Load` now refuses three knobs at startup** that it used to
+  accept silently (`LOG_LEVEL`, `LOCKOUT_THRESHOLD`, `DIGEST_INTERVAL_HOURS`).
+  That is the intended direction — a setting that silently does nothing
+  is worse than one that refuses to start — but it means an existing
+  deployment with a typo in one of them will fail to boot rather than
+  run with a default.
+
+## 2026-09-16 — Tier 4, Stage 2 (LLM provider, read-only DB, ask-ai widget)
+
+Stage 2 of Tier 4, on the same branch. Three settings endpoints, two new
+packages of this repo's own, and the point where this repo stopped being
+purely an HTTP wrapper.
+
+Commits, in order:
+
+- `bf1abaa` — the settings store and its at-rest encryption
+  (`settings/`, `migrations/013_settings`, `SETTINGS_ENCRYPTION_KEY`).
+- `bc7de0e` — `aiprovider.NewAnthropic`, a live `ai.LLMProvider` over
+  the official Anthropic Go SDK.
+- `b31ef89` — `aiprovider.PostgresSnapshot` plus `CheckReadOnly`.
+- `2815e90` — the LLM and database provider endpoints.
+- `10cea8d` — the ask-ai widget config and `aiprovider.ScopedProvider`.
+- plus an `openapi` bump to 1.5 and a README section.
+
+### The two decisions the Stage 1 entry left open were taken
+
+Both by following `NEXT.md`'s own instruction — "where something is
+genuinely unspecified, make the most reasonable call consistent with
+`CLAUDE.md`'s ownership rules and note the assumption in `PROGRESS.md`"
+— rather than by asking, since the instruction to ask was absent and the
+spec was explicit that it should not be needed.
+
+1. **A live LLM client, yes, and on the official SDK.** Implementing
+   `ai.LLMProvider` was unavoidable: the spec says the console
+   configures a provider, and a console configuring a provider nothing
+   can call is not useful. The SDK over hand-rolled HTTP because a
+   hand-rolled client would be a second thing to keep correct against a
+   moving API, and because it is the one part of this repo whose
+   correctness cannot be checked by reading it.
+2. **A dedicated `SETTINGS_ENCRYPTION_KEY`, not a reuse of
+   `ENCRYPTION_KEY`.** The precedent is already in this repo:
+   `CLOUD_LOG_HASH_KEY` exists rather than reusing `JWT_SECRET`. The two
+   seal different things with different lifetimes and blast radii —
+   cryden's key covers what the engine stores, this one what the API
+   stores — so one rotating should not force the other. Reusing it would
+   also mean a TOTP-secret rotation and an API-key rotation cannot be
+   scheduled apart.
+
+The encryption itself is cryden's `security.NewAESGCMEncryptor`, not a
+second AES-GCM implementation. That is the "if cryden already answers
+the question, call it" rule applied to a primitive: there is nothing
+about a provider API key that needs different treatment from a TOTP
+secret, and two implementations of the same cipher is one more place for
+a nonce to be reused.
+
+### The read-only check is the one piece of this tier worth reading twice
+
+`PUT /v1/admin/settings/database-provider` validates the DSN's shape,
+then **connects with the supplied credentials and attempts a write**,
+and stores nothing unless the server refuses. cryden's own interface
+comment is the requirement ("a real credential-level guarantee, not just
+a promise made in code, so a bug in validation still can't cause a
+write"), and `NEXT.md` says not to trust a checkbox. Three details are
+load-bearing:
+
+- The probe writes to `pg_temp`, the session's own temporary schema, so
+  a probe that fails leaves nothing for an operator to clean up. The
+  pool is pinned to one connection so the `CREATE` and the `INSERT`
+  share the session that owns the temp table — a pool that split them
+  would have the `INSERT` fail on a missing table, which looks exactly
+  like the refusal being tested for and is not one.
+- Only SQLSTATE `42501` counts as a refusal, matched by code rather than
+  by message, because the message is localized and reworded between
+  major versions and this is the branch that decides acceptance.
+- A third outcome is distinguished from both: a connection that never
+  opened, a timeout, or a `CREATE` that failed for a non-privilege
+  reason is `database_role_unverified` and **is refused**. Treating
+  "could not find out" as a pass would make the check succeed precisely
+  when it is least able to tell.
+
+The cost is that this endpoint is slow relative to its neighbours —
+a connection and two statements — bounded by a ten-second timeout. That
+is once per save, not once per query.
+
+### The widget's entity scope has teeth, on purpose
+
+`widget.Ask` force-scopes every parsed intent to the calling end user's
+own rows, overwriting rather than validating the identity filter the
+model produced (no oracle: every phrasing executes the same query). But
+it scopes over all of `ai.AllowedEntities`. Narrowing that is a host
+decision — cryden's allowlist is "what can be scoped safely", the
+operator's is "what this deployment offers" — so this repo enforces the
+configured subset in `aiprovider.ScopedProvider`, in front of the
+provider, which is the only place the entity is still visible before
+`Ask` parses, scopes and executes in one call. The alternative was
+storing a scope setting nothing consulted, which is worse than not
+having the setting.
+
+The list is checked against cryden's own `AllowedEntities` map rather
+than a copy, so this repo cannot refuse an entity the engine permits.
+One asymmetry is accepted knowingly and commented: `scopeToOwner` is a
+private switch over today's three entities, so an entity added to
+cryden's allowlist without a matching case there would pass validation
+and then fail at `Ask` time with `ErrEntityNotAvailable`. That is the
+safe direction — the widget refuses the question rather than answering
+it unscoped.
+
+### Verification: what this does NOT cover
+
+The suite is green — `gofmt -l` clean, `go build ./...`, `go vet ./...`,
+`go test -count=1 ./...` all pass, and `httpapi`, `settings` and
+`aiprovider` also pass under `-race`. That is not the same as this
+working, and three specific things are unproven:
+
+- **`aiprovider.CheckReadOnly` has never run against a real Postgres.**
+  There is no Postgres in this sandbox. `query_test.go` covers the
+  statement builder, the filter allowlist, the LIKE escaping and the
+  probe statements' shape, and `TestPutDatabaseProviderRefusesAnUnverifiableConnection`
+  drives a real connection attempt — but against a *closed port*, which
+  exercises the unverifiable branch. **The accepting path — 42501
+  arriving as a `*pq.Error` and being read as a pass — is the branch no
+  test here covers**, and it is the branch the feature depends on.
+  Likewise nothing has confirmed that a `CREATE TEMP TABLE` is actually
+  refused by a `GRANT SELECT`-only role as opposed to failing some other
+  way, which is the assumption the probe is built on.
+- **The Anthropic provider has never called Anthropic.** It is tested
+  against a local `httptest` server in the Messages API's wire shape,
+  which pins the request this repo builds and the response it parses.
+  That is a real test of this repo's half and no evidence at all about
+  the live service's half: a model id, a schema field name or a refusal
+  shape that differs in production would not be caught.
+- **`012_digest_runs` and `013_settings` have never been applied to a
+  database**, the same as `009`–`011`. Every `PostgresStore` in
+  `settings/` and `digest/` is reasoned-about rather than run, so a
+  column type or a constraint error would surface at first deploy.
+
+Also unchanged from every previous tier: `internal/smoketest` has still
+never been run.
+
+### Two things deliberately not built, rather than half-built
+
+- **Nothing constructs `ai.LLMProvider` or `ai.QueryableStore` from the
+  stored config.** `NEXT.md` asks for it ("this repo then constructs the
+  real implementation from that stored config at startup or on change").
+  The glue's only possible consumer today is a widget serving endpoint,
+  which does not exist, so writing it now would mean writing the
+  consumer's half blind and then rewriting it. It lands with its first
+  caller.
+- **The widget GET returns no embed snippet.** The snippet is markup the
+  console renders into its own pages, and its `<script src>` would name a
+  route this repo does not serve — so generating one would hand a console
+  a script tag pointing at a 404. The endpoint returns the configuration
+  a snippet is built from instead, which is also the more correct
+  ownership split.
+
+One consequence to be explicit about: **`allowed_origins` is stored and
+validated but nothing consults it at request time**, because nothing
+serves the widget yet. It is recorded here so the console has somewhere
+to keep it and so the widget endpoint has it to enforce when it lands.
+Until then it is the one field on this surface that is not load-bearing,
+and saying so is better than a comment implying it is.
+
+### The read-only rule now has a named exception, and it needed a reading
+
+`/v1/admin/settings/*` are the first writes under `/v1/admin`, and
+`CLAUDE.md`'s hard rule is that the admin surface is read-only. The
+reading taken: the rule covers the AI **tools**, which cryden builds
+through interfaces carrying no method that can act, rather than every
+route under `/v1/admin`; and a settings save is precisely what
+`NEXT.md`'s pre-fill-never-auto-apply decision names as the human half
+("a human still has to explicitly save that settings change through the
+normal config UI"). No AI-assisted handler holds a reference to these
+routes and none accepts a suggestion as input. The alternative readings
+are worse: storing the provider credential in cryden is ruled out by
+`NEXT.md` explicitly ("stored in this repo's own config table — never in
+cryden"), and environment-variables-only is ruled out by the same
+sentence.
+
+This is recorded as a reading, not as a fact, because it is the kind of
+thing worth disagreeing with. If the rule was meant to cover every route
+under `/v1/admin`, the settings endpoints belong somewhere else and the
+change is a router edit plus a README line.
+
+### Noticed while working, not fixed
+
+- **`config.Load` has one more startup-fatal knob**
+  (`SETTINGS_ENCRYPTION_KEY` — only when malformed, not when unset). Same
+  direction as the three Stage 1 added, same consequence: a typo means
+  the process does not boot.
+- **`openapi/spec.yaml` is now 1.5** and covers Tiers 1–4. It is
+  hand-maintained and large, and it can drift again; the path list is the
+  part most likely to.
+- **`settings.MemoryStore.Raw` is a test-only accessor kept off the
+  `Store` interface**, matching the convention the other in-memory
+  doubles here use. It is what lets a test assert that a credential was
+  sealed rather than trusting the handler to have done it.
+- **The `-race` run takes over two minutes** for `httpapi` alone, so it
+  is worth running as a separate command rather than appended to the
+  plain suite, which is how this entry's verification was done.
