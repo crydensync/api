@@ -16,6 +16,7 @@ import (
 	"github.com/crydensync/cryden/v2/security"
 	"github.com/crydensync/cryden/v2/store/postgres"
 
+	"github.com/crydensync/api/anomalyreview"
 	"github.com/crydensync/api/config"
 	"github.com/crydensync/api/digest"
 	"github.com/crydensync/api/httpapi"
@@ -57,6 +58,12 @@ func main() {
 	// token's claims below. See usermeta's package doc for why the
 	// reserved-key rule lives in the store rather than in the handler.
 	metadata := usermeta.NewStore(db)
+
+	// Flagged-event reviews: this repo's own table too. cryden records
+	// that a login tripped anomaly signals and has no concept of an
+	// operator having read one, so the judgement is stored here, keyed on
+	// the audit event id. See anomalyreview's package doc.
+	reviews := anomalyreview.NewStore(db)
 
 	// Webhook delivery log: this repo's own table, and the queue the
 	// sender writes to. Declared as the interface rather than as
@@ -381,6 +388,8 @@ func main() {
 		Digests: digestStore,
 
 		Settings: settingsSecrets,
+
+		Reviews: reviews,
 	})
 	limiter := httpapi.NewEdgeRateLimiter(cfg.EdgeRateLimit, cfg.EdgeRateLimitWindow)
 	handler := httpapi.WithCORS(cfg.CORSOrigins, httpapi.WithEdgeRateLimit(limiter, router))
