@@ -62,6 +62,25 @@ type Config struct {
 	// JWT_SECRET.
 	EncryptionKey string
 
+	// SettingsEncryptionKey seals the credentials this repo stores for
+	// the AI-assisted admin features — an LLM provider's API key, a
+	// read-only database's password — at rest, in the settings table.
+	//
+	// Deliberately NOT EncryptionKey, and this is the one place in this
+	// repo where a second key is spent rather than reused. EncryptionKey
+	// is cryden's: the engine derives from it whatever it needs to read
+	// TOTP secrets, and this repo never sees those bytes. This key is
+	// this repo's own, and the two have different lifetimes and different
+	// blast radii — rotating one must not silently make the other's rows
+	// unreadable. Every other purpose-keyed secret here follows the same
+	// rule (see CLOUD_LOG_HASH_KEY).
+	//
+	// Empty means the AI settings endpoints answer 404 not_configured
+	// rather than the server refusing to start, the same shape
+	// ENCRYPTION_KEY itself uses for the second factors: a deployment
+	// that has never opened that screen should still run.
+	SettingsEncryptionKey string
+
 	// TOTPIssuerName is what the user's authenticator app shows next to
 	// the account. Cosmetic. Empty means cryden's own default ("Cryden").
 	TOTPIssuerName string
@@ -115,6 +134,22 @@ type Config struct {
 	// to need company.
 	RateLimitAttempts int
 	RateLimitWindow   time.Duration
+
+	// LockoutThreshold and LockoutDuration are the engine's account
+	// lockout bounds: after LockoutThreshold consecutive failed attempts the
+	// account is locked for LockoutDuration. Defaults are cryden's own (5
+	// and 15 minutes), restated here for the same reason the rate-limit
+	// bounds are — and with a sharper edge, because the engine does not
+	// fill these in either way. A zero threshold locks an account on its
+	// very first failed password; a zero duration locks it until an instant
+	// already past, which is to say not at all.
+	//
+	// They are also what GET /v1/admin/config-tuning describes when it says
+	// a lockout setting is in force. Passed through to the engine rather
+	// than left implicit, so the report and the engine cannot disagree
+	// about what this deployment is actually running.
+	LockoutThreshold int
+	LockoutDuration  time.Duration
 
 	// PasswordHasher selects which algorithm NEW password hashes are
 	// written with — PasswordHasherBcrypt (the engine's default) or
@@ -233,6 +268,17 @@ type Config struct {
 	// that retries forever is a load generator pointed at a third party —
 	// and the row stays readable afterwards either way.
 	WebhookMaxAttempts int
+
+	// DigestInterval is how often the background job builds a digest and
+	// records it in digest_runs, which is what
+	// GET /v1/admin/digest/history reads back. Zero — the default — runs no
+	// job at all.
+	//
+	// Opt-in rather than "weekly by default", for the reason webhooks and
+	// cloud logging are: a deployment that has not asked for scheduled
+	// digests should not have a goroutine quietly accumulating rows. The
+	// on-demand GET /v1/admin/digest works either way, and writes nothing.
+	DigestInterval time.Duration
 }
 
 // PasswordHasher values. Bcrypt is the engine's own default and what an
@@ -343,6 +389,12 @@ func Load() (Config, error) {
 		}
 	}
 
+	// This repo's own key, for the credentials it stores itself in the
+	// settings table. Read here rather than defaulted from EncryptionKey
+	// above, on purpose — see the field comment for why the two are
+	// separate secrets with separate lifetimes.
+	cfg.SettingsEncryptionKey = os.Getenv("SETTINGS_ENCRYPTION_KEY")
+
 	// Anomaly detection and credential-stuffing detection — one switch,
 	// because they are one store. Both threshold sets begin as the
 	// engine's defaults and every knob below only replaces the one it
@@ -395,6 +447,22 @@ func Load() (Config, error) {
 		return cfg, err
 	}
 	if cfg.RateLimitWindow, err = envSeconds("RATE_LIMIT_WINDOW_SECONDS", time.Minute); err != nil {
+		return cfg, err
+	}
+
+	// Account lockout. Defaulted rather than left at zero — see the field
+	// comments: a zero threshold would lock every account on its first
+	// failed password, which is the opposite of a default. A threshold
+	// below 1 is refused for the same reason rather than read as "off":
+	// cryden has no way to switch lockout off, so a 0 here can only be a
+	// typo, and honouring it would lock every account on one bad password.
+	if cfg.LockoutThreshold, err = envInt("LOCKOUT_THRESHOLD", 5); err != nil {
+		return cfg, err
+	}
+	if cfg.LockoutThreshold < 1 {
+		return cfg, fmt.Errorf("LOCKOUT_THRESHOLD must be at least 1, got %d — cryden has no way to switch account lockout off", cfg.LockoutThreshold)
+	}
+	if cfg.LockoutDuration, err = envMinutes("LOCKOUT_DURATION_MINUTES", 15*time.Minute); err != nil {
 		return cfg, err
 	}
 
@@ -524,6 +592,19 @@ func Load() (Config, error) {
 				strings.Join(orphaned, ", "))
 		}
 	}
+
+	// Scheduled digests. Unset or 0 is off (see the field comment); a
+	// negative is refused rather than read as "off", because it can only
+	// be a typo and silently treating a typo as the default is how a
+	// setting an operator meant to change does nothing at all.
+	digestHours, err := envInt("DIGEST_INTERVAL_HOURS", 0)
+	if err != nil {
+		return cfg, err
+	}
+	if digestHours < 0 {
+		return cfg, fmt.Errorf("DIGEST_INTERVAL_HOURS cannot be negative — leave it unset to switch scheduled digests off, got %d", digestHours)
+	}
+	cfg.DigestInterval = time.Duration(digestHours) * time.Hour
 
 	return cfg, nil
 }
