@@ -970,8 +970,12 @@ and saying so is better than a comment implying it is.
 
 ### The read-only rule now has a named exception, and it needed a reading
 
-`/v1/admin/settings/*` are the first writes under `/v1/admin`, and
-`CLAUDE.md`'s hard rule is that the admin surface is read-only. The
+`/v1/admin/settings/*` are writes under `/v1/admin`, and `CLAUDE.md`'s
+hard rule is that the admin surface is read-only. (This entry originally
+said they were the *first* writes there. They were not: Tier 3's
+metadata `PUT`/`DELETE` had already written, so what needed a reading was
+not whether the surface was read-only — it never was — but whether a
+settings save is the kind of write the rule forbids.) The
 reading taken: the rule covers the AI **tools**, which cryden builds
 through interfaces carrying no method that can act, rather than every
 route under `/v1/admin`; and a settings save is precisely what
@@ -1005,3 +1009,142 @@ change is a router edit plus a README line.
 - **The `-race` run takes over two minutes** for `httpapi` alone, so it
   is worth running as a separate command rather than appended to the
   plain suite, which is how this entry's verification was done.
+
+## 2026-09-16 — Tier 5 (the users admin surface)
+
+Branch `feat/tier5-users-admin-surface`, five commits: a docs correction
+first, then the review store and its migration, the admin user lookup and
+detail endpoints, the MFA adoption report, and the flagged-event review
+queue. Docs last, as usual.
+
+Two design decisions were settled by the human before any of it was
+written, and both are load-bearing rather than preferences:
+
+- **Dismiss is a status, not a delete.** The rule against the AI tools
+  acting automatically is what matters; an admin endpoint a human
+  triggers is a different thing, and Tier 3's metadata `PUT`/`DELETE`
+  and Tier 4's settings routes had already written here. So a review keys
+  on the audit event id — the thing the console actually shows — and
+  dismissing sets a field rather than removing evidence. Withdrawing a
+  judgement stores `unreviewed`: the row stays, and so does the record of
+  who looked.
+- **Exact-email only, via `cryden.GetUser`.** Writing SQL against
+  cryden's own `users` table for a partial search would cross the
+  ownership boundary this project has been careful about everywhere
+  else. If partial search matters later it is its own deliberate
+  decision, not something bundled into this tier.
+
+### What the spec asked for versus what the engine allows
+
+`NEXT.md` specced MFA adoption as "`SearchByType`/count against
+`EventTOTPEnabled`/`EventWebAuthnRegistered` versus total user count".
+The counts exist; the thing they would be divided by does not. cryden's
+`TOTPStore` and `WebAuthnCredentialStore` are both per-user —
+`GetByUserID`, `ListByUser`, `Confirm`, `Delete` — with **no `Count` and
+no `ListAll`**, so "how many accounts currently have a factor enrolled"
+is a question the engine cannot be asked. Counting the rows in
+`totp_secrets` from here would answer it exactly and would be this repo
+writing SQL against the engine's schema, which is the boundary the
+second decision above invokes.
+
+So the report gives what the engine does record system-wide and says so:
+every field is named `*_events`, the DTO documents the missing store
+methods by name, and **no adoption percentage is derived anywhere**. A
+ratio of events to users would be a number that looks like coverage and
+moves for the wrong reasons — enrol, lose a phone, disable is one
+enrolment and one removal for zero net enrolment. Recovery codes are
+excluded from the factor list for a related reason: they are a fallback
+for an account that already has a factor, not a factor of their own, so
+counting `recovery_codes_generated` as enrolment would report a
+different thing than the label says.
+
+### The foreign key is doing real work
+
+The review table's `event_id` is `UUID PRIMARY KEY REFERENCES
+audit_events(id) ON DELETE CASCADE`, and the FK is the whole reason Go
+can refuse a review of an event that does not exist: cryden has no
+lookup by event id, and `SearchByType` is the only way to read an event
+back, so there is no Go-side check available. `audit_events.id` is a
+`gen_random_uuid()` primary key, so an FK against it accepts every real
+event and refuses every fabricated one, with SQLSTATE `23503` mapped to
+`404 audit_event_not_found`. That is the repo's existing
+SQLSTATE-by-code pattern from `aiprovider/query.go` (which matches
+`42501`), reused rather than reinvented.
+
+`anomalyreview.MemoryStore` reproduces the FK via `RegisterEvents`
+instead of accepting any id, because a double that accepted anything
+would let a test assert a 404 production never produces — the inversion
+Tier 4's never-run `CheckReadOnly` already taught. The tested branch is
+the one that runs.
+
+### Two bugs the tests caught, both worth recording
+
+- **The `status=unreviewed` filter returned nothing.** The handler
+  compared against what the store returned, so an event with no row at
+  all — which *is* unreviewed — was filtered out. That is the one tab an
+  operator opens first. Fixed by comparing against the same default the
+  response reports.
+- **`has_more` was computed from per-type saturation**, which claims
+  "there is more" when a type returned exactly its window but the queue
+  ends there. Replaced with "this page came back full, ask again" — the
+  honest direction, and exact in the other one: because the merged
+  window is a prefix of the queue rather than a sample of it, a page
+  short of `limit` really is the end. Measured on the *unfiltered* page,
+  so a status-filtered short page does not read as the end of the queue.
+
+A third thing was found by writing the test rather than by running it:
+`GET /v1/admin/anomalies/{eventID}` is not a route — only `PUT` is.
+A single flagged event is read as part of the queue, not on its own,
+because the engine has no lookup by event id to serve one from. The test
+asserting otherwise was wrong, not the router.
+
+### Verification — what was run, and what was not
+
+Run: `gofmt -l` clean, `go build ./...`, `go vet ./...`, and the full
+`go test -count=1 ./...` — all ten packages green, `httpapi` in ~38s.
+`openapi/spec.yaml` was parsed and checked twice: 33 paths, version 1.6,
+and no `$ref` into a schema that does not exist. Its path list was also
+diffed against `router.go`'s route table — every route this tier added
+is in the spec, and the only routes in code but not in spec are the
+pre-existing TOTP/WebAuthn/magic-link/OAuth ones, which were never in
+it.
+
+**Not run, and this is the part worth being precise about:**
+
+- **`-race` was not run this session.** Tier 4's entries recorded it as
+  green; this tier added no concurrency, but that is reasoning rather
+  than evidence and the run is owed.
+- **Migration `014_reviewed_anomalies` has never been applied to a
+  database**, and `anomalyreview.PostgresStore` has never executed a
+  single query against a real Postgres. `docker run ... postgres:16-alpine`
+  fails in this environment with `permission denied while trying to
+  connect to the docker API at unix:///var/run/docker.sock` — retried
+  with the sandbox disabled and it fails identically, so it is a real
+  environment restriction rather than a sandbox block. The consequence,
+  stated plainly: **the FK's `23503` mapping and the `pq.Array` binding
+  in `StatusesFor` are verified by reasoning and by the in-memory double
+  only.** Migrations `001`–`013` are in the same position. Everything
+  else on this surface is tested end to end on the in-memory store.
+
+### Noticed while working, not fixed
+
+- **`openapi/spec.yaml` is now 1.6** but its route list was never
+  complete: the TOTP, WebAuthn, magic-link, recovery-code and OAuth
+  paths from Tier 1 have no entries at all. This tier added its own four
+  and left that gap as it found it, since filling it is a Tier 1
+  documentation pass rather than part of this work.
+- **The README's endpoint list had drifted the same way** — digest,
+  support, config-tuning and settings routes were missing from it. Those
+  *were* added, because the admin block was being edited anyway and a
+  route list that omits half the admin surface while gaining new lines
+  is worse than either extreme.
+- **`security_handlers.go` has a lint diagnostic that predates this
+  tier** — "if statement can be modernized using max" on the `remaining <
+  0` floor in `HashMigration`. Left alone as unrelated churn in existing
+  code; noted so it is a decision rather than an oversight.
+- **`idAssigningAuditStore` is now doing real work for two surfaces.**
+  It exists because cryden's *memory* `AuditStore.Record` never sets
+  `ID` while its Postgres store gets one from `gen_random_uuid()`, and
+  every endpoint on this tier keys on the event id. It is a test double
+  for a gap in cryden's own double, kept here rather than patched into
+  the engine.
