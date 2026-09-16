@@ -11,6 +11,7 @@ import (
 	"github.com/crydensync/cryden/v2/token"
 
 	"github.com/crydensync/api/aiprovider"
+	"github.com/crydensync/api/anomalyreview"
 	"github.com/crydensync/api/settings"
 	"github.com/crydensync/api/usermeta"
 )
@@ -153,6 +154,17 @@ func mapError(err error) apiError {
 		return apiError{http.StatusBadRequest, "invalid_metadata_key", "a metadata key must start with a letter or underscore and contain only letters, digits, underscores, dots and dashes, up to 64 characters"}
 	case errors.Is(err, usermeta.ErrNotFound):
 		return apiError{http.StatusNotFound, "metadata_key_not_found", "no such metadata key on this user"}
+	// A review of a flagged event. "No such audit event" is answered by the
+	// database rather than by Go — cryden exposes no lookup-by-event-id, so
+	// the foreign key on reviewed_anomalies is what refuses it (see
+	// anomalyreview.PostgresStore.Set). It reads as 404 because that is what
+	// it is: a console acting on a stale list, not a server fault.
+	case errors.Is(err, anomalyreview.ErrNoSuchEvent):
+		return apiError{http.StatusNotFound, "audit_event_not_found", "no such audit event, so there is nothing to review"}
+	case errors.Is(err, anomalyreview.ErrInvalidStatus):
+		return apiError{http.StatusBadRequest, "invalid_review_status", "a review status must be one of unreviewed, confirmed or dismissed"}
+	case errors.Is(err, anomalyreview.ErrNoteTooLong):
+		return apiError{http.StatusBadRequest, "invalid_review_note", "that note is longer than the 500-character limit"}
 	// The settings behind the AI-assisted admin features. The two invalid
 	// cases are a form the operator can fix, so they say which field and
 	// which bound rather than a generic "bad request" — the caller is
