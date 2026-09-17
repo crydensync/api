@@ -56,11 +56,12 @@ type Scheduler struct {
 // start. A history that grows with restarts rather than with time is not
 // a history of anything.
 //
-// main.go hands this context.Background(), because this repo has no
-// graceful shutdown yet — the same caveat, and the same reasoning, as the
-// webhook worker's goroutine. Nothing here needs stopping today: an
-// interrupted run loses at most one digest, and the next interval builds
-// another.
+// main.go hands this the context the shutdown signal cancels, so a SIGTERM
+// stops it between runs. Nothing here needed to be stoppable for
+// correctness — an interrupted run records nothing and the next interval
+// builds another — but a build cut off halfway is worse than one that
+// never started, because half a window in the history reads as a quiet
+// week rather than as a missing one.
 func (s *Scheduler) Run(ctx context.Context) {
 	if s.Interval <= 0 || s.Store == nil || s.Build == nil {
 		return

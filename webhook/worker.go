@@ -145,10 +145,10 @@ func Verify(secret string, body []byte, header string) bool {
 }
 
 // Run delivers until ctx is cancelled. It is meant to be started once, in
-// its own goroutine; main.go passes context.Background() because this repo
-// has no graceful shutdown anywhere yet (see PROGRESS.md — introducing one
-// touches every component and is its own change, not a passenger on this
-// one).
+// its own goroutine; main.go hands it the context the shutdown signal
+// cancels, so a SIGTERM stops it. A delivery cut off mid-flight is not
+// lost — the row stays in_flight and the stale reclaim picks it up on the
+// next boot, which is why stopping promptly is safe here.
 func (w *Worker) Run(ctx context.Context) {
 	w.applyDefaults()
 	if w.Secret == "" {

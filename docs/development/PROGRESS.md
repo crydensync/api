@@ -1393,3 +1393,57 @@ false. 501 is a statement about the deployment, and it is true.
   entries — was left as found, still a Tier 1 documentation pass.
 - `.env.example` documents the two backends at the top.
 - New `migrations/sqlite/README.md`.
+
+## 2026-09-17 — graceful shutdown (not a tier)
+
+On `feat/tier6-sqlite-backend`'s working tree, branched off as its own
+change. This is the item Tiers 3, 5 and 6 each recorded as owed; it was
+done now rather than inside Tier 7 because Tier 7's own spec says not to
+ship distribution before it — a container whose every `docker stop`
+kills in-flight requests is the bug the packaging would have shipped.
+
+**What was wrong, in three parts.** `main.go` ended at
+`log.Fatal(http.ListenAndServe(...))`. (1) No signal handling, so
+`SIGTERM` killed the process mid-request. (2) `log.Fatalf` calls
+`os.Exit`, which runs no defers, so the `defer db.Close()` above it had
+never once run. (3) On SQLite, no close means no WAL checkpoint — this
+was the finding that started it: after two boots of the smoke run,
+`api.db` was still 4096 bytes while `api.db-wal` held 461KB, so a backup
+copying `api.db` alone produced a database that opened without error and
+was empty.
+
+**What was built.** `signal.NotifyContext` on `SIGINT`/`SIGTERM` gives
+one `appCtx` that the HTTP server and both background workers hang off.
+`net.Listen` is separated from `srv.Serve` so a listen failure is
+reported rather than being a `Fatal` that skips teardown. The main
+goroutine selects on either `Serve` returning on its own or the signal;
+on the signal it calls `drain` (`shutdown.go`), which is `srv.Shutdown`
+bounded by a 30s constant and falls back to `srv.Close` when the bound
+is hit. Teardown then runs in the order the components need:
+`stopSignals()`, `workers.Wait()`, `askAI.Close()`, `redisClient.Close()`,
+`db.Close()` last. Both `sync.WaitGroup.Go` (Go 1.25) and the hoisting of
+`redisClient`/`askAI` exist so the teardown has something to close.
+
+**Verified end to end, not just by unit test.** Built the binary,
+started it on a fresh `/tmp/walcheck.db`, ran the full `internal/smoketest`
+(13/13), sent a real `SIGTERM` to the actual server PID, then opened the
+database **read-only with no `-wal`/`-shm` present**: 7 migrations
+recorded, 1 user, 2 sessions. The sidecar files were gone entirely, which
+is the checkpoint. `shutdown_test.go` also pins the three properties
+`drain` exists for: an in-flight request still gets its 200 and the
+drain waits for it; a request that will not finish is abandoned at the
+bound with an error naming the wait; a listener that fails on its own
+reports that error instead of having it translated to a clean shutdown.
+
+**Also corrected**: four doc comments that asserted this repo has no
+shutdown path and are now false (`askai.Service.Close`,
+`webhook.Worker.Run`, `digest.Scheduler.Run`, and `shiplog`'s
+synchronous-write argument). The `shiplog` one changed its *reasoning*,
+not just its wording — the missing piece for an async sink is now the
+buffer and the flush policy, not a lifecycle to hang it off — so that is
+recorded rather than deleted.
+
+**Not done.** `-race` still has not been run. `shutdownDrainTimeout` is
+a constant, not a knob, on purpose. No readiness endpoint separate from
+`/v1/health`, so load-balancer behaviour during the drain is unchanged.
+`go build ./... && go vet ./... && go test ./...` are all clean.
