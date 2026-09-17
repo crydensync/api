@@ -130,6 +130,15 @@ func NewRouter(d Deps) http.Handler {
 	anomalies := &AnomalyHandlers{Audit: d.Audit, Reviews: d.Reviews}
 	askAI := &WidgetHandlers{Service: d.AskAI}
 
+	// The gate for every route under /v1/admin, resolved once. On a
+	// Postgres deployment this is RequireAdmin; on a SQLite one it is a
+	// flat 501, because the console's tables are Postgres-only. Routing
+	// all 25 admin registrations through this one value is deliberate —
+	// it is what makes "the whole admin console needs DATABASE_URL" a
+	// property of the router rather than a list to keep in sync. See
+	// AdminOnly.
+	adminOnly := AdminOnly(engine, d.Config)
+
 	mux := http.NewServeMux()
 
 	// Public
@@ -226,11 +235,13 @@ func NewRouter(d Deps) http.Handler {
 	// admin surface — see WidgetHandlers.
 	mux.HandleFunc("POST /v1/ask-ai", RequireAuth(engine, askAI.Ask))
 
-	// Admin endpoints. Everything under /v1/admin goes through RequireAdmin
-	// (middleware.go), which needs the `role` claim an operator's token
-	// carries. OAuth provider health and the hash-migration report are both
-	// this repo's own logic — cryden has no concept of a provider being
-	// reachable, and no bulk way to read stored hash algorithms.
+	// Admin endpoints. Everything under /v1/admin goes through adminOnly
+	// above — RequireAdmin on a Postgres deployment, which needs the `role`
+	// claim an operator's token carries, and a flat 501 on a SQLite one,
+	// where the console's tables do not exist at all. OAuth provider health
+	// and the hash-migration report are both this repo's own logic — cryden
+	// has no concept of a provider being reachable, and no bulk way to read
+	// stored hash algorithms.
 	//
 	// Read-only is the default and every write here is deliberate. There
 	// are three, and each is a named exception rather than a category: the
@@ -240,13 +251,13 @@ func NewRouter(d Deps) http.Handler {
 	// save, the one path a tuning suggestion may pre-fill). None is
 	// reachable from an AI tool, which is what CLAUDE.md's hard rule
 	// actually protects. See README's note on the admin surface.
-	mux.HandleFunc("GET /v1/admin/oauth/health", RequireAdmin(engine, oauthHealth.Health))
-	mux.HandleFunc("GET /v1/admin/security/hash-migration", RequireAdmin(engine, security.HashMigration))
+	mux.HandleFunc("GET /v1/admin/oauth/health", adminOnly(oauthHealth.Health))
+	mux.HandleFunc("GET /v1/admin/security/hash-migration", adminOnly(security.HashMigration))
 	// Second-factor enrolment, as the engine's own audit events against the
 	// user total. Reports events rather than users, and says so — cryden
 	// has no count of accounts with a factor enrolled, and getting one from
 	// here would mean SQL against the engine's schema. See MFAAdoption.
-	mux.HandleFunc("GET /v1/admin/security/mfa-adoption", RequireAdmin(engine, security.MFAAdoption))
+	mux.HandleFunc("GET /v1/admin/security/mfa-adoption", adminOnly(security.MFAAdoption))
 
 	// The user surface — finding an account, and reading one account's
 	// state. Read-only: there is no lock, unlock, password reset or
@@ -259,8 +270,8 @@ func NewRouter(d Deps) http.Handler {
 	// the detail route with one, which Go's ServeMux distinguishes; the
 	// metadata routes below are more specific still and win over the
 	// detail route for their own paths.
-	mux.HandleFunc("GET /v1/admin/users", RequireAdmin(engine, users.List))
-	mux.HandleFunc("GET /v1/admin/users/{userID}", RequireAdmin(engine, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/admin/users", adminOnly(users.List))
+	mux.HandleFunc("GET /v1/admin/users/{userID}", adminOnly(func(w http.ResponseWriter, r *http.Request) {
 		users.Detail(w, r, r.PathValue("userID"))
 	}))
 
@@ -269,13 +280,13 @@ func NewRouter(d Deps) http.Handler {
 	// fields of one user cannot overwrite each other's work. The user id
 	// is a path segment and is never read from the body, so there is no
 	// second place it could come from.
-	mux.HandleFunc("GET /v1/admin/users/{userID}/metadata", RequireAdmin(engine, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/admin/users/{userID}/metadata", adminOnly(func(w http.ResponseWriter, r *http.Request) {
 		metadata.List(w, r, r.PathValue("userID"))
 	}))
-	mux.HandleFunc("PUT /v1/admin/users/{userID}/metadata/{key}", RequireAdmin(engine, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("PUT /v1/admin/users/{userID}/metadata/{key}", adminOnly(func(w http.ResponseWriter, r *http.Request) {
 		metadata.Put(w, r, r.PathValue("userID"), r.PathValue("key"))
 	}))
-	mux.HandleFunc("DELETE /v1/admin/users/{userID}/metadata/{key}", RequireAdmin(engine, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("DELETE /v1/admin/users/{userID}/metadata/{key}", adminOnly(func(w http.ResponseWriter, r *http.Request) {
 		metadata.Delete(w, r, r.PathValue("userID"), r.PathValue("key"))
 	}))
 
@@ -283,14 +294,14 @@ func NewRouter(d Deps) http.Handler {
 	// operator's endpoint, and what it failed to. Read-only: there is no
 	// endpoint here that re-queues or deletes a delivery, deliberately (see
 	// WebhookHandlers).
-	mux.HandleFunc("GET /v1/admin/webhooks/deliveries", RequireAdmin(engine, hooks.Deliveries))
+	mux.HandleFunc("GET /v1/admin/webhooks/deliveries", adminOnly(hooks.Deliveries))
 
 	// The shipped-events log — the redacted, filtered copy of the engine's
 	// own log records that the cloud sink was handed, which is what a
 	// hosted aggregator would have received. Read-only, and the only way
 	// to see it: cryden keeps no history of what it logged, so this table
 	// is the history.
-	mux.HandleFunc("GET /v1/admin/logging/recent", RequireAdmin(engine, logging.Recent))
+	mux.HandleFunc("GET /v1/admin/logging/recent", adminOnly(logging.Recent))
 
 	// The weekly digest, and the history of the ones the schedule built.
 	//
@@ -300,22 +311,22 @@ func NewRouter(d Deps) http.Handler {
 	// leaves no trace. GET /v1/admin/digest/history reads what the
 	// scheduled job recorded, and nothing on this surface can create a
 	// row there. Both are read-only; see DigestHandlers.
-	mux.HandleFunc("GET /v1/admin/digest", RequireAdmin(engine, digests.Digest))
-	mux.HandleFunc("GET /v1/admin/digest/history", RequireAdmin(engine, digests.DigestHistory))
+	mux.HandleFunc("GET /v1/admin/digest", adminOnly(digests.Digest))
+	mux.HandleFunc("GET /v1/admin/digest/history", adminOnly(digests.DigestHistory))
 
 	// The support-ticket assistant: "why can't this person log in",
 	// answered from the account's own recorded history. Read-only by
 	// construction — cryden builds it through interfaces carrying no way
 	// to clear a lockout or reset a counter, so it cannot fix the account
 	// it is describing. See SupportHandlers.
-	mux.HandleFunc("GET /v1/admin/support/diagnose", RequireAdmin(engine, support.Diagnose))
+	mux.HandleFunc("GET /v1/admin/support/diagnose", adminOnly(support.Diagnose))
 
 	// The config tuning advisor. Suggestions only: there is no endpoint
 	// that applies one, and no parameter that changes a setting — the
 	// recorded decision is that a suggestion pre-fills the settings field
 	// it concerns and a human saves that change through the ordinary
 	// settings path. See TuningHandlers and CLAUDE.md's hard rule.
-	mux.HandleFunc("GET /v1/admin/config-tuning", RequireAdmin(engine, tuning.ConfigTuning))
+	mux.HandleFunc("GET /v1/admin/config-tuning", adminOnly(tuning.ConfigTuning))
 
 	// The flagged-event review queue — what the engine flagged, and what a
 	// human decided about it. GET is read-only; PUT records a judgement
@@ -323,8 +334,8 @@ func NewRouter(d Deps) http.Handler {
 	// confirmation takes no action on any account, deliberately: there is
 	// no machinery here that acts, so there is nothing for a confirm
 	// button to trigger. See AnomalyHandlers.
-	mux.HandleFunc("GET /v1/admin/anomalies", RequireAdmin(engine, anomalies.List))
-	mux.HandleFunc("PUT /v1/admin/anomalies/{eventID}", RequireAdmin(engine, func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/admin/anomalies", adminOnly(anomalies.List))
+	mux.HandleFunc("PUT /v1/admin/anomalies/{eventID}", adminOnly(func(w http.ResponseWriter, r *http.Request) {
 		anomalies.Review(w, r, r.PathValue("eventID"))
 	}))
 
@@ -346,15 +357,15 @@ func NewRouter(d Deps) http.Handler {
 	// storing anything, so a role that can modify the database is rejected
 	// at the form rather than trusted. That is why the endpoint is
 	// noticeably slower than its neighbours.
-	mux.HandleFunc("GET /v1/admin/settings/llm-provider", RequireAdmin(engine, aiSettings.LLMProvider))
-	mux.HandleFunc("PUT /v1/admin/settings/llm-provider", RequireAdmin(engine, aiSettings.PutLLMProvider))
-	mux.HandleFunc("DELETE /v1/admin/settings/llm-provider", RequireAdmin(engine, aiSettings.DeleteLLMProvider))
-	mux.HandleFunc("GET /v1/admin/settings/database-provider", RequireAdmin(engine, aiSettings.DatabaseProvider))
-	mux.HandleFunc("PUT /v1/admin/settings/database-provider", RequireAdmin(engine, aiSettings.PutDatabaseProvider))
-	mux.HandleFunc("DELETE /v1/admin/settings/database-provider", RequireAdmin(engine, aiSettings.DeleteDatabaseProvider))
-	mux.HandleFunc("GET /v1/admin/settings/ask-ai-widget", RequireAdmin(engine, aiSettings.AskAIWidget))
-	mux.HandleFunc("PUT /v1/admin/settings/ask-ai-widget", RequireAdmin(engine, aiSettings.PutAskAIWidget))
-	mux.HandleFunc("DELETE /v1/admin/settings/ask-ai-widget", RequireAdmin(engine, aiSettings.DeleteAskAIWidget))
+	mux.HandleFunc("GET /v1/admin/settings/llm-provider", adminOnly(aiSettings.LLMProvider))
+	mux.HandleFunc("PUT /v1/admin/settings/llm-provider", adminOnly(aiSettings.PutLLMProvider))
+	mux.HandleFunc("DELETE /v1/admin/settings/llm-provider", adminOnly(aiSettings.DeleteLLMProvider))
+	mux.HandleFunc("GET /v1/admin/settings/database-provider", adminOnly(aiSettings.DatabaseProvider))
+	mux.HandleFunc("PUT /v1/admin/settings/database-provider", adminOnly(aiSettings.PutDatabaseProvider))
+	mux.HandleFunc("DELETE /v1/admin/settings/database-provider", adminOnly(aiSettings.DeleteDatabaseProvider))
+	mux.HandleFunc("GET /v1/admin/settings/ask-ai-widget", adminOnly(aiSettings.AskAIWidget))
+	mux.HandleFunc("PUT /v1/admin/settings/ask-ai-widget", adminOnly(aiSettings.PutAskAIWidget))
+	mux.HandleFunc("DELETE /v1/admin/settings/ask-ai-widget", adminOnly(aiSettings.DeleteAskAIWidget))
 
 	return mux
 }
