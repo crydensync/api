@@ -838,3 +838,105 @@ so a load balancer's behavior during the drain is unchanged. And
 `shutdownDrainTimeout` is a constant rather than an env var on purpose:
 if the ask-ai widget's model calls ever stop being bounded by the
 provider's own client timeout, that becomes a knob.
+
+## Tier 7 — distribution: binaries, Docker, and migration DX
+
+Three things landed, and they are one story: a release is now a single
+artifact that carries its own schema, so `git clone` or `docker run` is
+the whole setup and no step is done by hand.
+
+**A Postgres migration runner** (`migrate.go`), which did not exist in
+any form before this tier. Cryden deliberately ships one only for SQLite
+— its own comment gives the reason, which is Postgres-specific: a
+Postgres deployment already has `psql` and usually a migration tool, so
+shipping `.sql` files is enough. That reasoning is sound for cryden and
+is exactly why the host needs one: this repo's whole premise is that a
+deployment is one binary and one env file, and "now go find a way to pipe
+fourteen files into your database" is that premise undone.
+
+The runner follows cryden's SQLite runner closely — same tracking-table
+shape, same filename ordering, same one-transaction-per-file, same
+"up-migrations only" rule — so a host running both backends does not
+have to hold two mental models of "migrated". The two rules it adds are
+its own:
+
+- **`.down.sql` is never automatic.** Cryden says the same; the reason
+  bears repeating because it is a data-safety rule and not a convention.
+- **`--baseline` records every embedded migration as applied without
+  running any of them.** This is the one decision the tier's spec did not
+  anticipate. Every database that already has this schema — including
+  what this repo's own CI built by piping `psql` — has no
+  `schema_migrations` table, so the first boot with auto-migration would
+  have started at `001` and died on `relation "users" already exists`.
+  The churn here is small (no production deployments), but the shape of
+  the failure is the kind that bites: a deployment that cannot start,
+  caused by the feature meant to make starting easier. Baseline is an
+  explicit command rather than boot-time detection because detection
+  guesses, and its wrong guess — "tracking table missing but `users`
+  exists, so assume everything ran" — silently marks unrun migrations as
+  applied on a half-migrated database.
+
+**The runner is tested against SQLite, deliberately.** This environment
+has never had a Postgres, so the obvious test shape (apply a real
+migration, assert a real table) is unavailable. What is available is
+everything about the runner that is not the backend: filename ordering,
+recording, idempotence, "only pending files run", the rollback-and-
+no-marker property on failure, and baseline recording without running.
+Every one of those is the difference between a working database and a
+corrupted one, and all of them are backend-independent. So the runner
+takes an `fs.FS` and the single statement that differs between backends
+(lib/pq numbers its placeholders, SQLite does not), and `migrate_test.go`
+drives it over in-memory SQLite. Ten tests. The Postgres-specific part
+that remains unverified is the embedded file *contents* — which is
+precisely what cannot be checked without a Postgres, and it is recorded
+as owed rather than implied by green tests.
+
+One thing the runner relies on and worth naming: each migration file is
+executed as one string, so the driver must accept multiple statements in
+a single `Exec`. lib/pq does, and the code is where you would want it —
+`conn.go`'s `Exec` takes its simple-query path when `len(args) == 0`.
+Splitting on semicolons instead would break on dollar-quoted function
+bodies and on a semicolon inside a string literal, which is the classic
+way a homegrown migration runner corrupts a database.
+
+**The binary now has two commands.** No argument serves, as before — so
+every existing doc, CI file and Docker invocation keeps working — and
+`migrate` applies pending migrations and exits without starting a server.
+The subcommand shares `openDatabase` with the server path so the two
+cannot drift into connecting differently: a migration applied over a
+connection with different pragmas is not the same migration. `SKIP_AUTO_MIGRATE=true`
+turns off the boot-time apply for teams who want schema change to be a
+reviewed pipeline step.
+
+**Packaging**: a multi-stage `Dockerfile` (alpine, non-root, CA certs)
+whose `ENTRYPOINT` is in exec form specifically so `docker stop`'s
+`SIGTERM` reaches the binary rather than `/bin/sh` — which is the whole
+point of the graceful shutdown built just before this tier, and would
+have been silently defeated by a one-word difference. `release.yml`
+cross-compiles five platforms with `CGO_ENABLED=0` (possible because both
+drivers are pure Go) and pushes to `ghcr.io` with the workflow's own
+token, so publishing an image needs no extra secret. CI's `psql` loop and
+its `postgresql-client` install are both **gone**: the server migrates
+itself now, so CI starts it against an empty database and everything
+after that point depends on the runner having worked. That is a stronger
+check than the loop was — piping files through `psql` proved the SQL was
+valid, but could not have caught a runner that applied them in the wrong
+order, twice, or not at all.
+
+**What is still owed, said plainly.** The `Dockerfile` and both
+workflows **were not executed** — this environment has no Docker
+(`permission denied ... docker.sock`) and no Actions runner. They are the
+largest unverified surface in this repo, and `PROGRESS.md` says so rather
+than letting "the YAML looks right" stand in for a run. The Postgres
+runner's *mechanics* are tested, but its embedded SQL has never been
+applied to a real Postgres from here: no Postgres was reachable in this
+environment, so `001`–`014` remain unapplied and
+`anomalyreview.PostgresStore` has still never run. CI is where that
+changes — its new boot path applies all fourteen to an empty database on
+every run — and CI has not run yet either. So the first genuine
+Postgres exercise of the runner is the first CI run after this branch is
+pushed, and if it fails, the failure will be in exactly the part no test
+here could reach. `-race` is still not run. The binary has no
+`--version`, which for a distributed artifact is a real gap — knowing
+which build is running is most of what a bug report needs — and is the
+obvious next addition.

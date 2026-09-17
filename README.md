@@ -18,9 +18,20 @@ cp .env.example .env   # fill in DATABASE_URL, JWT_SECRET, CORS_ORIGINS
 go run .
 ```
 
-Run the migrations in `migrations/` against your database first, in order (copies of CrydenSync's own migrations, kept here so this repo is self-contained for local dev and CI — same as `typebook` keeps its own copy). `002_oauth_identities` is required even if you don't use OAuth yet — `NewOAuthStore` is wired into the engine config unconditionally. `004` through `008` are the TOTP, WebAuthn, recovery-code, login-attempt and API-key tables; run them even if you leave `ENCRYPTION_KEY` unset, since `007` is what the engine's credential-stuffing detection reads once Tier 2 wires it up and `008` is what the API-key work will use.
+That is the whole setup. Migrations are applied automatically on boot — see [Migrations](#migrations) — so there is no separate step to run and nothing to remember after a `git pull`. Or with Docker, which needs no Go toolchain at all:
 
-That paragraph is the Postgres path only. On SQLite there is nothing to run by hand — `main.go` calls cryden's own `sqlite.Migrate` at startup. See [The two backends](#the-two-backends).
+```bash
+docker run --env-file .env -p 8080:8080 ghcr.io/crydensync/api:latest
+```
+
+A SQLite deployment can skip the database server entirely by setting `SQLITE_PATH` and mounting a volume for it:
+
+```bash
+docker run --env-file .env -p 8080:8080 -v api-data:/data \
+  -e SQLITE_PATH=/data/api.db ghcr.io/crydensync/api:latest
+```
+
+On SQLite, note that the container runs as a non-root user (uid 10001); a host directory mounted into `/data` must be writable by it.
 
 OAuth is optional. To enable a provider, set its client ID/secret plus `BASE_URL` (used to build the callback URL registered in that provider's console):
 
@@ -89,6 +100,28 @@ The connection is opened with three pragmas, all of them load-bearing: `foreign_
 **Backing up a SQLite deployment means copying `api.db`, `api.db-wal` and `api.db-shm` together**, or checkpointing first. With WAL, recent writes — including, on a fresh deployment, the entire schema — live in the `-wal` file until a checkpoint folds them into the main file. Copying `api.db` alone can silently produce an empty database in that window.
 
 A clean stop is what closes that window: on `SIGTERM` or `SIGINT` the server stops accepting connections, waits up to 30 seconds for the requests already in flight, stops the webhook worker and digest scheduler, and closes the database — which on SQLite is the checkpoint that folds the `-wal` file back into `api.db` and removes the sidecar files. So `systemctl stop`, `docker stop` and Ctrl-C all leave a `api.db` that is complete on its own. A `kill -9`, a crash or a power loss does not, which is why the paragraph above still stands.
+
+## Migrations
+
+There is no migrate step in the setup instructions because there does not need to be one. Migrations are compiled into the binary and applied on boot, so a `git pull` or a new container image brings its own schema change with it.
+
+The two backends are migrated by different code, and that is deliberate rather than an inconsistency:
+
+- **Postgres** — this repo's own runner (`migrate.go`) over this repo's own `migrations/*.sql`, embedding all fourteen into the binary. It records what it applied in a `schema_migrations` table it creates itself, so a second boot is a no-op.
+- **SQLite** — cryden's runner over cryden's embedded migrations, because cryden owns that schema. See [The two backends](#the-two-backends).
+
+Both follow the same rules: `NNN_*.up.sql` in filename order, one transaction per file, and `.down.sql` files are never run automatically — an automatic rollback of a schema holding live credentials is not something a boot path should be able to do by accident.
+
+```
+api migrate            # apply pending migrations and exit; starts no server
+api migrate --baseline # record every embedded migration as already applied
+```
+
+`api migrate` is for teams who would rather schema changes be a reviewed step than something that happens during a rolling deploy. Set `SKIP_AUTO_MIGRATE=true` and the server starts without touching the schema; `api migrate` is then the step, in your pipeline, before the new version goes out.
+
+**If your database already has this schema but no `schema_migrations` table** — you applied the SQL by hand, or an earlier version of this repo had CI do it for you via `psql` — then run `api migrate --baseline` once before your first start. Without it, auto-migration starts at `001` and stops on `relation "users" already exists`: a deployment that cannot start, caused by the feature meant to make starting easier. Baseline records every embedded migration as applied and runs none of them.
+
+It is an explicit command rather than something the boot path detects, because the alternative is guessing. "The tracking table is missing but `users` exists, so assume everything ran" is right for the case above and silently wrong for a database that is genuinely half-migrated — it would mark unrun migrations as applied, and the next deploy would look for columns that were never created.
 
 ## Second factors
 
