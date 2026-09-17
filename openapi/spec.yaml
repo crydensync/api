@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: CrydenSync API
-  version: "1.7"
+  version: "1.8"
   description: >
     A self-hosted HTTP wrapper around the CrydenSync auth engine.
     Every response follows one of two envelope shapes: {"data": ...}
@@ -108,6 +108,33 @@ info:
     whose behaviour depends on a settings write taking effect without a
     restart — it reads the stored provider configuration on every
     question, so a change saved through 1.5 is in force on the next one.
+
+    1.8 is the SQLite backend, and it is the first version here that
+    is not additive in the usual sense: no path was added, removed or
+    reshaped, and no success response changed, but every path under
+    /admin can now answer 501 not_implemented_on_sqlite on a
+    deployment started with SQLITE_PATH instead of DATABASE_URL. That
+    is one decision rather than 25: the console's tables (operators,
+    user_metadata, webhook_deliveries, shipped_log_events,
+    digest_runs, settings, reviewed_anomalies) are Postgres-only, and
+    RequireAdmin depends on operators, so the entire console is
+    unavailable rather than parts of it. A client that reads 501 from
+    an /admin path as "this operator lacks access" will be misreading
+    it — the deployment has no console for anyone, including a
+    legitimate operator. The alternative considered was letting the
+    existing 403 happen, which would have said exactly that misleading
+    thing to every caller on such a deployment.
+
+    Everything outside /admin works on both backends, with one
+    exception worth naming because it is not an /admin path: POST
+    /ask-ai answers 404 not_configured on SQLite, since the provider
+    configuration it reads lives in the Postgres-only settings table.
+    That 404 is the same shape the path already gives on a Postgres
+    deployment with no provider configured.
+
+    A SQLite deployment issues tokens normally, so a client cannot
+    detect the backend from an auth response — only from an /admin
+    path's 501, or from that 404 on POST /ask-ai.
 servers:
   - url: http://localhost:8080/v1
     description: Local dev
@@ -884,6 +911,20 @@ components:
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotImplementedOnSQLite:
+      description: >
+        not_implemented_on_sqlite — this deployment runs on SQLite, so
+        the whole admin console is unavailable. Returned for every
+        /admin path before the token is examined, which is why it can
+        appear where a 401 or 403 otherwise would. A property of the
+        deployment, not of the caller: the console's tables are
+        Postgres-only and RequireAdmin itself depends on the operators
+        table, so a SQLite deployment has no operators and no partial
+        console to offer. See the 1.8 note in this document's
+        description.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
 
 paths:
   /signup:
@@ -1374,7 +1415,13 @@ paths:
             disabled and an unconfigured widget is not a different thing
             to a caller than a deliberately off one. not_configured —
             the widget is on but the deployment has no LLM provider or
-            no read-only database stored.
+            no read-only database stored. On a SQLite deployment this
+            path always answers not_configured, since there is no
+            settings table to store a provider in — see the 1.8 note in
+            this document's description. The whole provider
+            configuration is absent, so the answer is the same one a
+            Postgres deployment gives with no provider stored, and no
+            client needs to know which backend it is talking to.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
@@ -1413,6 +1460,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: not_configured — the router was built without the stores this report reads.
           content:
@@ -1458,6 +1506,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: not_configured — the router was built without the stores this report reads.
           content:
@@ -1492,6 +1541,7 @@ paths:
                         items: { $ref: '#/components/schemas/OAuthProviderHealth' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
 
   /admin/users:
     get:
@@ -1551,6 +1601,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: not_configured — the router was built without the user store.
           content:
@@ -1589,6 +1640,7 @@ paths:
                   data: { $ref: '#/components/schemas/AdminUserDetail' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: >
             not_found for an unknown or malformed userID — a path segment
@@ -1628,6 +1680,7 @@ paths:
                   data: { $ref: '#/components/schemas/UserMetadata' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: >
             not_found — no such user, or a userID that is not a UUID at
@@ -1709,6 +1762,7 @@ paths:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: not_found, or not_configured. See GET on this path.
           content:
@@ -1747,6 +1801,7 @@ paths:
                   data: { $ref: '#/components/schemas/UserMetadata' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: >
             metadata_key_not_found when the user has no such key;
@@ -1818,6 +1873,7 @@ paths:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: not_configured — the router was built without the audit or review store.
           content:
@@ -1883,6 +1939,7 @@ paths:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: >
             audit_event_not_found — there is no audit event with that id,
@@ -1954,6 +2011,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: >
             not_configured — the router was built without a delivery log,
@@ -2024,6 +2082,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: >
             not_configured — the router was built without a shipped-events
@@ -2093,6 +2152,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: >
             not_configured — the router was built without the audit
@@ -2156,6 +2216,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
 
   /admin/digest:
     get:
@@ -2211,6 +2272,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
 
   /admin/digest/history:
     get:
@@ -2255,6 +2317,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: >
             not_configured — no digest_runs store is wired, which is what
@@ -2300,6 +2363,7 @@ paths:
                   data: { $ref: '#/components/schemas/RedactedLLMProvider' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: not_configured. See this path's description.
           content:
@@ -2364,6 +2428,7 @@ paths:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: not_configured. See GET on this path.
           content:
@@ -2391,6 +2456,7 @@ paths:
                   data: { $ref: '#/components/schemas/RedactedLLMProvider' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: not_configured. See GET on this path.
           content:
@@ -2422,6 +2488,7 @@ paths:
                   data: { $ref: '#/components/schemas/RedactedDatabaseProvider' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: not_configured. See this path's description.
           content:
@@ -2491,6 +2558,7 @@ paths:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: not_configured. See GET on this path.
           content:
@@ -2513,6 +2581,7 @@ paths:
                   data: { $ref: '#/components/schemas/RedactedDatabaseProvider' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: not_configured. See GET on this path.
           content:
@@ -2562,6 +2631,7 @@ paths:
                   data: { $ref: '#/components/schemas/AskAIWidgetConfig' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: not_configured. See this path's description.
           content:
@@ -2624,6 +2694,7 @@ paths:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: not_configured. See GET on this path.
           content:
@@ -2647,6 +2718,7 @@ paths:
                   data: { $ref: '#/components/schemas/AskAIWidgetConfig' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: not_configured. See GET on this path.
           content:
