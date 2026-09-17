@@ -16,6 +16,7 @@ import (
 	"github.com/crydensync/cryden/v2/security"
 	"github.com/crydensync/cryden/v2/store/postgres"
 
+	"github.com/crydensync/api/anomalyreview"
 	"github.com/crydensync/api/config"
 	"github.com/crydensync/api/digest"
 	"github.com/crydensync/api/httpapi"
@@ -57,6 +58,12 @@ func main() {
 	// token's claims below. See usermeta's package doc for why the
 	// reserved-key rule lives in the store rather than in the handler.
 	metadata := usermeta.NewStore(db)
+
+	// Flagged-event reviews: this repo's own table too. cryden records
+	// that a login tripped anomaly signals and has no concept of an
+	// operator having read one, so the judgement is stored here, keyed on
+	// the audit event id. See anomalyreview's package doc.
+	reviews := anomalyreview.NewStore(db)
 
 	// Webhook delivery log: this repo's own table, and the queue the
 	// sender writes to. Declared as the interface rather than as
@@ -112,10 +119,16 @@ func main() {
 		log.Printf("AI settings endpoints enabled (llm-provider, database-provider)")
 	}
 
+	// Hoisted for the same reason users and audit are: the router reads
+	// the same instance. GET /v1/admin/users/{userID} reports a live
+	// session count, and a count taken from a second store object would
+	// describe sessions the engine is not the one revoking.
+	sessions := postgres.NewSessionStore(db)
+
 	engineCfg := cryden.Config{
 		JWTSecret:       cfg.JWTSecret,
 		Users:           users,
-		Sessions:        postgres.NewSessionStore(db),
+		Sessions:        sessions,
 		Audit:           audit,
 		Verifications:   postgres.NewVerificationStore(db),
 		EmailSender:     &consoleEmailSender{Templates: emailTemplates},                           // dev stand-in — see email_sender.go
@@ -368,11 +381,15 @@ func main() {
 		Meta:   metadata,
 		Hooks:  webhookStore,
 
+		Sessions: sessions,
+
 		Shipped: shippedLog,
 
 		Digests: digestStore,
 
 		Settings: settingsSecrets,
+
+		Reviews: reviews,
 	})
 	limiter := httpapi.NewEdgeRateLimiter(cfg.EdgeRateLimit, cfg.EdgeRateLimitWindow)
 	handler := httpapi.WithCORS(cfg.CORSOrigins, httpapi.WithEdgeRateLimit(limiter, router))

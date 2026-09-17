@@ -343,15 +343,21 @@ Two details were decided rather than assumed, and are recorded in
 >   write a row, so an operator hitting it twenty times does not fill
 >   the history with twenty near-identical reports. Only the scheduled
 >   job writes.
-> - **`/v1/admin/settings/*` is the admin surface's first write**, and
->   the read-only rule below has been read as covering the AI *tools*
->   rather than every route under `/v1/admin`. The reasoning is in
->   `SettingsHandlers`' doc comment and in `CLAUDE.md`'s own wording: a
+> - **The read-only rule below has been read as covering the AI
+>   *tools* rather than every route under `/v1/admin`.** The reasoning is
+>   in `SettingsHandlers`' doc comment and in `CLAUDE.md`'s own wording: a
 >   settings save is what "a human still has to explicitly save that
 >   change through the normal config UI" names, and no AI-assisted
 >   handler holds a reference to it. The alternative reading — store the
 >   LLM key in cryden, or in the environment only — is worse: the spec
 >   below explicitly says this repo owns that config storage.
+>
+>   *(Correction: this bullet originally said `/v1/admin/settings/*` was
+>   the admin surface's first write. It was not — Tier 3's `PUT`/`DELETE
+>   /v1/admin/users/{userID}/metadata/{key}` have written since then, so
+>   the admin surface was never read-only and this tier did not change
+>   that. The reading above is unaffected; the claim about precedence
+>   was simply wrong.)*
 >
 > The two decisions this tier had recorded as open were resolved by
 > following this file's own instruction to make the reasonable call and
@@ -444,18 +450,84 @@ tools' suggestions pre-fill.
 
 ## Tier 5 — users admin surface (new, no engine gap, just missing endpoints)
 
+> **Status: built on `feat/tier5-users-admin-surface`.** All four
+> endpoints exist, are wired in `main.go`, and are tested end to end on
+> the in-memory stores — `go build`, `go vet` and `go test ./...` clean.
+> Migration `014_reviewed_anomalies` is written and copied into
+> `migrations/`; it has **never been applied to a database**, and
+> `anomalyreview.PostgresStore` has never run against a real Postgres.
+> No Docker or Postgres was available in the environment this was built
+> in, so the migration's foreign key and its `23503` mapping are
+> verified by reasoning and by the in-memory double, not by execution.
+> `-race` was not run this session either. `PROGRESS.md` says all of this
+> in full rather than implying a verification that did not happen.
+
 - `GET /v1/admin/users?q=...&limit=...&offset=...` → `cryden.GetUser`
   for an exact match, `ListAll`/`Count` for browsing. Behind
   `RequireAdmin`.
+  **Built as specced, with the search narrowed to exact-only.** `q` goes
+  to `cryden.GetUser` and nothing else: partial search would mean SQL
+  against cryden's own `users` table, which is the ownership boundary
+  this repo has kept everywhere else. The match is also case-*sensitive*,
+  because cryden stores addresses exactly as typed and compares them
+  with `=` — so the response carries `match: "exact_email"` and a
+  console can explain a zero-result search instead of leaving an
+  operator to conclude the account is gone. A search that finds nothing
+  is an empty 200, never a 404.
 - `GET /v1/admin/users/{userID}` → account detail view, likely
   composing `GetUser` with session count and recent audit history.
+  **Built.** `active_sessions` is a count rather than a list,
+  deliberately — listing devices would publish every IP and user agent
+  an account has signed in from to anyone holding an operator token.
+  `locked` is computed from the lockout deadline rather than mirrored
+  from the column, because cryden clears a lockout by time passing, not
+  by writing a null. `PasswordHash` is on the struct this is built from
+  and is kept off the wire, with a test asserting that against the raw
+  body.
 - **MFA/passkey adoption stats** (new, no engine gap): computable via
   `AuditStore.SearchByType`/count against `EventTOTPEnabled`/
   `EventWebAuthnRegistered` versus total user count — same pattern as
   the Argon2id migration progress endpoint in Tier 3.
+  **Built as `GET /v1/admin/security/mfa-adoption`, and it reports
+  events rather than users.** The spec above assumed a user count was
+  available to divide by; it is not. cryden's `TOTPStore` and
+  `WebAuthnCredentialStore` are per-user with no `Count` and no
+  `ListAll`, so "how many accounts have a factor" is a question the
+  engine cannot be asked — and answering it here would mean counting
+  rows in cryden's own tables. Every field is therefore named
+  `*_events`, and **no adoption percentage is derived anywhere**: a
+  ratio of events to `total_users` would look like coverage and move for
+  the wrong reasons (a user who enrols, loses a phone and disables
+  contributes one of each and is enrolled zero times over).
 - **Anomaly review/dismiss state** (new, this repo's own table):
   cryden's `AnomalyStore`/`AuditStore` record signals but have no
   concept of a human having reviewed one. A `reviewed_anomalies` table
   here (audit event ID, reviewer, status, timestamp) backs a
   review/dismiss workflow the console can drive; cryden's own audit
   history is never mutated to reflect this.
+  **Built as `GET /v1/admin/anomalies` + `PUT /v1/admin/anomalies/{eventID}`.**
+  Two decisions were settled by the human before it was written, and
+  both are load-bearing:
+  - **Dismiss is a status, not a delete, and the evidence stays.** The
+    table has `status IN ('unreviewed','confirmed','dismissed')` and no
+    DELETE anywhere; withdrawing a judgement stores `unreviewed` rather
+    than removing the row, so the record of who looked — and that they
+    changed their mind — survives.
+  - **The queue is keyed on the audit event id**, which is what a
+    console has in hand. Since cryden has no lookup by event id, the
+    existence check is carried by a foreign key from
+    `reviewed_anomalies.event_id` to `audit_events.id`, with the
+    resulting SQLSTATE `23503` mapped to a clean
+    `404 audit_event_not_found`.
+  - **Confirming takes no action on any account.** No lock, no session
+    revoke, no threshold change. This repo has no machinery that acts on
+    an account beyond what an operator does by hand, and putting one
+    behind a confirm button is exactly the automatic action `CLAUDE.md`
+    forbids. The queue is the two `signals`-carrying event types
+    (`anomaly_detected`, `credential_stuffing_detected`); widening it to
+    the failure events around them would make the audit table the queue.
+
+**Not built, and not part of this tier**: the widget's own serving
+endpoint. The Stage 2 widget *configuration* exists, but nothing serves
+an embeddable widget, so `allowed_origins` is still stored and
+unenforced — the same gap `CURRENT-STATE.md` records for Tier 4.

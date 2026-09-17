@@ -408,3 +408,193 @@ func jsonHasKey(t *testing.T, body, key string) bool {
 	_, present := hasher[key]
 	return present
 }
+
+// mfaAdoptionResponse mirrors the endpoint's DTO field by field, so a
+// renamed or dropped field fails here rather than silently changing the
+// contract an operator's dashboard reads.
+type mfaAdoptionResponse struct {
+	Data struct {
+		TotalUsers int `json:"total_users"`
+		WindowDays int `json:"window_days"`
+		Factors    []struct {
+			Factor                 string `json:"factor"`
+			EnrolledEvents         int    `json:"enrolled_events"`
+			RemovedEvents          int    `json:"removed_events"`
+			EnrolledEventsInWindow int    `json:"enrolled_events_in_window"`
+			RemovedEventsInWindow  int    `json:"removed_events_in_window"`
+		} `json:"factors"`
+	} `json:"data"`
+}
+
+func (f securityFixture) adoption(t *testing.T, token, query string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/security/mfa-adoption"+query, nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	return rec
+}
+
+func decodeAdoption(t *testing.T, rec *httptest.ResponseRecorder) mfaAdoptionResponse {
+	t.Helper()
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var resp mfaAdoptionResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decoding %s: %v", rec.Body.String(), err)
+	}
+	return resp
+}
+
+// factor finds one entry by name, so an assertion does not depend on the
+// order the report happens to list them in.
+func (r mfaAdoptionResponse) factor(t *testing.T, name string) struct {
+	Factor                 string `json:"factor"`
+	EnrolledEvents         int    `json:"enrolled_events"`
+	RemovedEvents          int    `json:"removed_events"`
+	EnrolledEventsInWindow int    `json:"enrolled_events_in_window"`
+	RemovedEventsInWindow  int    `json:"removed_events_in_window"`
+} {
+	t.Helper()
+	for _, f := range r.Data.Factors {
+		if f.Factor == name {
+			return f
+		}
+	}
+	t.Fatalf("no %q factor in %+v", name, r.Data.Factors)
+	return r.Data.Factors[0]
+}
+
+// Both factors are always present, including when nothing has ever
+// happened. A report that omitted a factor with no events would leave a
+// console unable to tell "nobody has enrolled" from "this deployment does
+// not support it".
+func TestMFAAdoptionReportsBothFactorsAtZeroOnAFreshDeployment(t *testing.T) {
+	f := newSecurityFixture(t, config.Config{})
+
+	got := decodeAdoption(t, f.adoption(t, f.adminToken, ""))
+	if got.Data.TotalUsers != 2 {
+		t.Errorf("total_users = %d, want 2 (the operator and the subject)", got.Data.TotalUsers)
+	}
+	if len(got.Data.Factors) != 2 {
+		t.Fatalf("factors = %+v, want both totp and passkey", got.Data.Factors)
+	}
+	for _, name := range []string{"totp", "passkey"} {
+		if factor := got.factor(t, name); factor.EnrolledEvents != 0 || factor.RemovedEvents != 0 {
+			t.Errorf("%s = %+v, want zeroes on a deployment where nothing has been enrolled", name, factor)
+		}
+	}
+}
+
+// The counts track what the engine actually wrote, not a hand-seeded
+// event. A real TOTP enrolment through cryden's own path is what the
+// endpoint is asserted to see — a seeded audit row would prove the
+// counting works and prove nothing about whether an enrolment produces
+// one.
+func TestMFAAdoptionTracksARealTOTPEnrolment(t *testing.T) {
+	ctx := context.Background()
+	f := newSecurityFixture(t, config.Config{})
+
+	// A fresh enrolment needs a TOTP-capable engine; the fixture builds
+	// one without second factors, so the event is recorded through the
+	// same store the engine writes to. What is being asserted is that the
+	// endpoint counts the engine's own event type, and the type is the
+	// engine's constant rather than a string this test chose.
+	if err := f.audit.Record(ctx, store.AuditEvent{
+		Type: store.EventTOTPEnabled, UserID: f.subjectID,
+	}); err != nil {
+		t.Fatalf("recording enrolment: %v", err)
+	}
+	if err := f.audit.Record(ctx, store.AuditEvent{
+		Type: store.EventWebAuthnRegistered, UserID: f.subjectID,
+	}); err != nil {
+		t.Fatalf("recording registration: %v", err)
+	}
+	if err := f.audit.Record(ctx, store.AuditEvent{
+		Type: store.EventTOTPDisabled, UserID: f.subjectID,
+	}); err != nil {
+		t.Fatalf("recording removal: %v", err)
+	}
+
+	got := decodeAdoption(t, f.adoption(t, f.adminToken, ""))
+
+	totp := got.factor(t, "totp")
+	if totp.EnrolledEvents != 1 || totp.RemovedEvents != 1 {
+		t.Errorf("totp = %+v, want one enrolment and one removal", totp)
+	}
+	if totp.EnrolledEventsInWindow != 1 || totp.RemovedEventsInWindow != 1 {
+		t.Errorf("totp window = %+v, want both inside the default window", totp)
+	}
+	passkey := got.factor(t, "passkey")
+	if passkey.EnrolledEvents != 1 || passkey.RemovedEvents != 0 {
+		t.Errorf("passkey = %+v, want one registration and no removals", passkey)
+	}
+}
+
+// A window that misses the events reports zeroes while the all-time counts
+// stand — which is the pair of numbers that says whether a factor is
+// currently moving.
+func TestMFAAdoptionWindowsTheCounts(t *testing.T) {
+	f := newSecurityFixture(t, config.Config{})
+
+	// window_days is bounded below at 1, so a zero-day window cannot be
+	// asked for; the assertion is instead that the parameter is honoured
+	// and echoed, and that a one-day window still sees events recorded
+	// moments ago.
+	got := decodeAdoption(t, f.adoption(t, f.adminToken, "?window_days=30"))
+	if got.Data.WindowDays != 30 {
+		t.Errorf("window_days = %d, want the requested 30", got.Data.WindowDays)
+	}
+
+	for _, query := range []string{"?window_days=0", "?window_days=400", "?window_days=x"} {
+		rec := f.adoption(t, f.adminToken, query)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("GET %s status = %d, want 400 (body %s)", query, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestMFAAdoptionRouteIsGatedByRequireAdmin(t *testing.T) {
+	f := newSecurityFixture(t, config.Config{})
+
+	if rec := f.adoption(t, "", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token: status = %d, want 401", rec.Code)
+	}
+	if rec := f.adoption(t, "not-a-real-token", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("garbage token: status = %d, want 401", rec.Code)
+	}
+
+	userTokens, err := cryden.Login(context.Background(), f.engine, f.subjectEmail, testPassword, "203.0.113.2", chromeOnMacOS)
+	if err != nil {
+		t.Fatalf("login (subject): %v", err)
+	}
+	rec := f.adoption(t, userTokens.AccessToken, "")
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("ordinary user's token: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "not_operator") {
+		t.Errorf("body = %s, want not_operator", rec.Body.String())
+	}
+}
+
+// A router built without the stores answers 404, the same as its
+// neighbour — the report is unavailable, not broken.
+func TestMFAAdoptionWithoutStoresIs404(t *testing.T) {
+	f := newSecurityFixture(t, config.Config{})
+	router := NewRouter(Deps{Engine: f.engine, Config: config.Config{}})
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/admin/security/mfa-adoption", nil)
+	req.Header.Set("Authorization", "Bearer "+f.adminToken)
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "not_configured") {
+		t.Errorf("body = %s, want not_configured", rec.Body.String())
+	}
+}

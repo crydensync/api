@@ -44,6 +44,19 @@ func queryLimit(r *http.Request) (int, error) {
 	return queryInt(r, "limit", defaultListLimit, 1, maxListLimit)
 }
 
+// maxListOffset bounds how far into a list a caller may page. Not a
+// correctness bound — an offset costs the database the same whether it is
+// 10 or 10,000 — but an unbounded one is a way to make a list endpoint
+// walk a whole table one request at a time, and nothing in a console
+// reads that far in.
+const maxListOffset = 10000
+
+// queryOffset reads the optional offset query parameter, defaulting to the
+// first page.
+func queryOffset(r *http.Request) (int, error) {
+	return queryInt(r, "offset", 0, 0, maxListOffset)
+}
+
 // queryString reads an optional, trimmed string query parameter.
 func queryString(r *http.Request, name string) string {
 	return strings.TrimSpace(r.URL.Query().Get(name))
