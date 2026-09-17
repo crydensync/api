@@ -17,12 +17,14 @@ migrations to copy.
 Tier 3 is done, in two stages on `feat/tier3-config-and-endpoints` — see
 the status note under Tier 3 and `PROGRESS.md`'s 2026-09-15 entries.
 Tier 4 is done, both stages, on `feat/tier4-ai-admin-endpoints` — see
-the status note under Tier 4. One thing from Tier 4 is carried forward
-rather than left implicit: the ask-ai widget has configuration but no
-serving endpoint yet, so nothing calls `widget.Ask` and nothing
-constructs a live `ai.LLMProvider`/`ai.QueryableStore` from the stored
-settings. That is real unbuilt work, not a verification gap — pick it
-up before or alongside Tier 6/7 below, don't let two new tiers bury it.
+the status note under Tier 4. One thing from Tier 4 was carried forward
+rather than left implicit — the ask-ai widget had configuration but no
+serving endpoint — and **that is now done**, on
+`feat/ask-ai-widget-serving`. It was picked up before Tier 6 rather
+than buried under two new tiers, as the note below asked. See
+`CURRENT-STATE.md`'s section on it; the short version is that the route
+is `RequireAuth` rather than `RequireAdmin`, and the status note under
+Tier 4 below carries a correction about why.
 Tier 5 is done — see the status note under Tier 5 and `PROGRESS.md`.
 
 ---
@@ -325,6 +327,23 @@ Two details were decided rather than assumed, and are recorded in
 >   snippet, because the URL in one would name a route this repo does
 >   not serve.
 >
+>   **Superseded.** The serving endpoint was built after Tier 5 on
+>   `feat/ask-ai-widget-serving`: `POST /v1/ask-ai` calls `widget.Ask`,
+>   `allowed_origins` is consulted on every question, and the pair the
+>   widget needs is constructed from the stored settings. Only the last
+>   sentence survives, and only its conclusion — the GET still returns
+>   no embed snippet, but no longer because the URL would 404. The
+>   reason now is that the markup belongs to the console. See
+>   `CURRENT-STATE.md`.
+>
+>   **A correction to this tier's own heading, worth carrying.** Tier 4
+>   is titled "AI-assisted admin endpoints (all behind `RequireAdmin`)",
+>   and that was never true of this item. The widget belongs to the
+>   signed-in end user and answers questions about their own account, so
+>   its route is `RequireAuth`. The heading is true of the *settings*
+>   routes; reading it as covering everything this tier listed is the
+>   mistake the carry-forward note above invited.
+>
 > What is still owed from Stage 1:
 >
 > - the digest schedule is a goroutine on `context.Background()`, because
@@ -535,6 +554,11 @@ tools' suggestions pre-fill.
 endpoint. The Stage 2 widget *configuration* exists, but nothing serves
 an embeddable widget, so `allowed_origins` is still stored and
 unenforced — the same gap `CURRENT-STATE.md` records for Tier 4.
+
+> **Closed.** That endpoint was built after Tier 5 on
+> `feat/ask-ai-widget-serving`; `allowed_origins` is enforced at request
+> time. What is still owed on it is per-user rate limiting, recorded in
+> `CURRENT-STATE.md` and `PROGRESS.md` rather than guessed at here.
 
 ---
 

@@ -1148,3 +1148,134 @@ it.
   every endpoint on this tier keys on the event id. It is a test double
   for a gap in cryden's own double, kept here rather than patched into
   the engine.
+
+## 2026-09-17 — the ask-ai widget's serving endpoint
+
+Branch `feat/ask-ai-widget-serving`, cut from
+`feat/tier5-users-admin-surface` rather than `main`, because the whole
+tier stack 2–5 is still unmerged and this sits on top of Tier 4 Stage 2's
+settings work. This is the item `NEXT.md`'s Tier 4 carry-forward note
+asked to be picked up "before or alongside Tier 6/7", done before Tier 6
+so two new tiers do not bury it.
+
+`go build ./...`, `go vet ./...`, `go test ./...` and `gofmt -l` are all
+clean on this branch — the full suite, not just the two packages touched,
+at 41s for `httpapi` alone. What was **not** run is the same list every
+entry since Tier 4 has carried: no Postgres or Docker in this sandbox
+(`permission denied … unix:///var/run/docker.sock`), so migrations
+`001`–`014` remain unapplied, and `-race` was not run.
+
+### The decision that shaped everything else
+
+**`POST /v1/ask-ai` is behind `RequireAuth`, not `RequireAdmin`.** Every
+other AI-assisted surface in this repo is admin-only, so this looks like
+an oversight and is the opposite of one. cryden's `widget` package doc
+says it is for "a host application's own end users", `widget.Ask` takes
+an `ownerUserID` the host must supply from its own authentication, and
+the widget answers questions about the signed-in user's own sessions and
+audit events. Behind `RequireAdmin` it would be unusable for every person
+it exists for.
+
+Checked against three independent sources before writing the route —
+cryden's `widget/ask.go` doc and `ownerUserID` contract, this repo's
+`README.md`, and `settings/widget.go`'s note that `"*"` is refused
+because the widget answers about the signed-in user — and flagged to the
+user before building, because it contradicts the heading of the tier
+that specced it. `NEXT.md` Tier 4 is titled "AI-assisted admin endpoints
+(all behind `RequireAdmin`)"; that is true of the *settings* routes and
+was never true of this one, which Tier 4 listed but did not build. A
+correction now sits under that heading.
+
+### Decisions worth not re-litigating
+
+- **Providers are cached on a content fingerprint, settings are read per
+  question.** Three short reads and two AES-GCM opens against one model
+  call that takes hundreds of milliseconds at best. The alternative —
+  cache the providers behind an invalidation the settings handlers fire
+  — fails silently when a future writer forgets to fire it. The
+  fingerprint is SHA-256, not the settings, because two of its three
+  inputs are credentials.
+- **`Composer` stays nil**, so `widget.Ask` falls back to `RenderResult`.
+  cryden's doc calls nil "a valid, strictly safer default"; supplying one
+  is a second model call per question whose output nothing validates.
+- **An absent `Origin` is allowed.** Documented at length on `checkOrigin`
+  because it reads like a hole. It is not: `Origin` is forgeable by
+  anything that is not a browser, so refusing an absent one would break
+  every non-browser client while stopping nobody — whoever can forge an
+  allowlisted origin can also omit it. The Bearer token is the boundary.
+- **The `Providers` factory seam is exported**, not a test-only accessor.
+  Without it none of the properties worth testing — owner scoping, entity
+  scoping, rebuild-on-change — are observable without a live database. It
+  is also the hook a host on a different LLM backend needs, which is the
+  honest reason it is public rather than a test escape hatch.
+
+### A real bug the tests caught
+
+The first `canonicalOrigin` used `url.Parse(origin).Hostname()`, which
+ignores the path — so `https://console.example.com/widget` canonicalised
+to the same key as the allowed origin and was **accepted**. Caught by
+`TestCheckOrigin`'s own table case for a path.
+
+Fixed by refusing a path, query, fragment or userinfo outright and
+requiring the scheme be `http`/`https`, mirroring
+`settings.validateWidgetOrigin`. The mirroring is the point: the
+allowlist was stored under that rule, so a comparison that ignored a path
+would accept a value the operator could never have stored, and the two
+sides of one rule disagreeing is how a check stops meaning what its
+comment says. Default ports are normalised away on both sides, because
+browsers omit `:443` and an operator who typed it would otherwise have
+configured an entry that silently never matched.
+
+### Stale premises corrected — four copies of one false claim
+
+Tier 4 Stage 2's widget GET documented that it returns no embed snippet
+"because the URL in it would name an endpoint this repo does not serve
+yet". That endpoint now exists, so the reason expired. The claim was
+written in four places, and all four were corrected rather than left:
+`httpapi/settings_handlers.go`'s doc comment, `README.md`,
+`docs/development/CURRENT-STATE.md`, and `openapi/spec.yaml`.
+
+The conclusion survives — no snippet is still returned — but for a
+different reason: the snippet is markup for the console's own pages, and
+this repo has no opinion on another repo's markup. The endpoint path is
+in the spec with every other path rather than returned as a string from a
+settings GET.
+
+Also corrected under the same heading: `CURRENT-STATE.md`'s summary and
+Stage 2 section both said nothing wires `ai.LLMProvider`/
+`ai.QueryableStore` from the stored config, which this work is.
+
+### Docs
+
+- **`openapi/spec.yaml` is now 1.7**, additive: the `POST /ask-ai` path
+  with its four error statuses, an `AskAIAnswer` schema, and a 1.7
+  paragraph naming what makes this path different from its neighbours.
+  No existing path, field or status code changed. YAML re-parsed and
+  checked after editing (34 paths).
+- `README.md` gained a "Serving the widget" section and the route line,
+  in the authenticated block where it belongs rather than the admin one.
+- `CURRENT-STATE.md` gained its own section for this work and had the two
+  false claims above corrected in place.
+- `NEXT.md`'s three carry-forward passages now record it as done.
+
+### Noticed while working, not fixed
+
+- **No per-user rate limiting on this route.** It spends deployment money
+  per question and is bounded only by the global per-IP
+  `EDGE_RATE_LIMIT`. A real limit needs policy — per-user or
+  per-deployment, and what number — which is a deployment's call rather
+  than something to invent here. Recorded in `README.md` and
+  `CURRENT-STATE.md` as owed.
+- **`askai.Service.Close()` exists and nothing calls it**, for the same
+  reason `PROGRESS.md` has carried since Tier 3: this repo still has no
+  graceful shutdown. It is there so adding one does not have to start by
+  widening this type's API.
+- **The live path to Anthropic is still unexercised.** The route is
+  tested through the `Providers` seam with doubles; `aiprovider`'s own
+  tests pin the wire shape against a local fake. Same gap Tier 4 Stage 2
+  recorded, unchanged by this work.
+- **`openapi/spec.yaml`'s route list is still incomplete** — the TOTP,
+  WebAuthn, magic-link, recovery-code and OAuth paths from Tier 1 have no
+  entries, as the Tier 5 entry noted. This work added its own path and
+  left that gap as it found it, since filling it is a Tier 1
+  documentation pass.
