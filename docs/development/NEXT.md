@@ -634,6 +634,22 @@ own deliberate tier, not a quiet scope-creep of this one.
 
 ## Tier 7 — distribution: binaries, Docker, and migration DX
 
+> **Done.** Built on `feat/tier7-distribution`. Two deviations from the
+> spec below, both argued in `PROGRESS.md` and both tested rather than
+> merely commented:
+>
+> - **`migrations/sqlite/*.sql` is not embedded**, though the spec asked
+>   for it. cryden's runner reads cryden's own embedded copy, so these
+>   files would sit in the binary unread — Tier 6's README already
+>   documents them as reference material.
+> - **`--baseline` was added**, which the spec did not anticipate. The
+>   spec's premise ("there is no migration runner in this repo today")
+>   was true, but it missed the consequence: every database that already
+>   has this schema — including what this repo's own CI built by piping
+>   `psql` — has no tracking table, so auto-migration would stop on
+>   `relation "users" already exists`. See the spec text below for what is
+>   still owed.
+
 The goal: `git clone` (or `docker run`), copy the env file, run, no
 separate migrate step, no Go toolchain required for someone who isn't
 a Go developer at all.
@@ -647,30 +663,61 @@ greenfield rather than an extension of something existing, and the
 bullet asks for is simply the design — there is no earlier runner to
 avoid duplicating.
 
-- **Embed migrations into the binary** with `embed.FS` — both
+**One correction to that paragraph, found while building it:** the
+*SQLite* half already had a runner — cryden's. What was missing was a
+Postgres one, and the reason Postgres needs one here when cryden
+deliberately ships none is in cryden's own comment on `store/sqlite`:
+a Postgres deployment already has `psql` and usually a migration tool,
+so shipping `.sql` files is enough. This tier's job was to stop
+requiring either.
+
+**Still owed from this tier, said plainly:** neither the `Dockerfile`
+nor either workflow was executed — this environment has no Docker
+(`permission denied ... docker.sock`) and no GitHub Actions runner, so
+both shipped unverified and are the largest untested surface this repo
+has. `PROGRESS.md` records it.
+
+- ~~**Embed migrations into the binary** with `embed.FS` — both
   `migrations/*.sql` (Postgres) and `migrations/sqlite/*.sql` from
   Tier 6, so the running binary never depends on the source tree being
-  present next to it.
-- **Auto-migrate on startup, on by default.** Before opening the
+  present next to it.~~ — built, **for Postgres only**. See the
+  deviations note above for why the SQLite copies are not embedded.
+- ~~**Auto-migrate on startup, on by default.** Before opening the
   listening port, connect to the configured database, apply any
-  migration that hasn't run yet, in order, then start serving.
-- **`SKIP_AUTO_MIGRATE=true`** as the escape hatch for teams who want a
+  migration that hasn't run yet, in order, then start serving.~~ —
+  built, in `migrate.go`, before any store is constructed. The one
+  thing this bullet does not mention and that had to be decided:
+  `schema_migrations` is created by the runner itself, because a
+  migration cannot create the table that records migrations.
+- ~~**`SKIP_AUTO_MIGRATE=true`** as the escape hatch for teams who want a
   controlled deploy step instead of migrations running silently on
-  every boot. When set, startup skips straight to serving.
-- **A `migrate` subcommand** (`./api migrate`) that only applies
+  every boot. When set, startup skips straight to serving.~~ — built.
+  Note it does **not** skip `sqlite.CheckPragmas`, which is a property
+  of the connection rather than of the schema.
+- ~~**A `migrate` subcommand** (`./api migrate`) that only applies
   pending migrations and exits, no server started — this is what
   `SKIP_AUTO_MIGRATE=true` deployments use as their explicit step. It
   uses the same embedded files and the same apply function as the
   automatic path: one runner written once, called from two places,
-  rather than two implementations of "run migrations" to keep in sync.
-- **Binary releases**: extend the existing `.github/workflows/release.yml`
+  rather than two implementations of "run migrations" to keep in sync.~~
+  — built, and the "one runner called from two places" shape held
+  exactly as written: `migrate()` in `migrate.go` is called by the boot
+  path and by the subcommand, with no second implementation. A
+  `--baseline` flag was added; see the deviations note above.
+- ~~**Binary releases**: extend the existing `.github/workflows/release.yml`
   (already triggers on `v*` tags) to cross-compile and attach binaries
   for `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, and
-  `windows/amd64` to the GitHub Release.
-- **Docker image**: a `Dockerfile` (multi-stage: build in a Go image,
+  `windows/amd64` to the GitHub Release.~~ — written, unexecuted.
+  `dist/*` plus a `SHA256SUMS` are attached.
+- ~~**Docker image**: a `Dockerfile` (multi-stage: build in a Go image,
   run from a minimal base), published to a registry on the same tag
   trigger. `docker run --env-file .env -p 8080:8080 <image>` should be
-  the entire setup instructions.
+  the entire setup instructions.~~ — written, unexecuted, pushed to
+  `ghcr.io` with the workflow's own token so no extra secret is needed.
+  `alpine` rather than `distroless` for one concrete reason recorded in
+  the `Dockerfile`: a SQLite deployment needs a writable `/data` volume
+  and a nonroot distroless image cannot be handed one without a
+  `COPY --chown` trick that costs more readability than it buys.
 - ~~**Graceful shutdown, pulled forward from Tier 3/4's owed list**~~ —
   built ahead of this tier, on its own branch, because the original
   reasoning here was that shipping distribution first would ship a
