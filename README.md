@@ -161,6 +161,8 @@ POST   /v1/api-keys                  (auth required, raw key returned once)
 GET    /v1/api-keys                  (auth required)
 DELETE /v1/api-keys/{keyID}          (auth required)
 
+POST   /v1/ask-ai                    (auth required, NOT admin — see below)
+
 GET    /v1/admin/oauth/health             (admin required)
 GET    /v1/admin/security/hash-migration  (admin required)
 GET    /v1/admin/security/mfa-adoption    (admin required)
@@ -481,7 +483,26 @@ The LLM API key and the database connection string are sealed with **AES-256-GCM
 - **`"*"` as an origin is refused by name**, with the reason in the message: this widget answers questions about the signed-in user's sessions and audit events, so a wildcard origin would let any page on the internet ask them through a visitor's browser.
 - **The refusal names neither the entity nor the scope.** That error reaches an end user through the widget; listing the configured entities would be describing the console's schema to whoever is typing questions at it.
 - **A disabled widget may be otherwise empty**, so switching the feature off does not require filling in fields that are about to stop mattering. Anything that *is* filled in is still validated, so a form cannot store a value that was never checked and would be rejected the moment it was switched on.
-- **No embed snippet is returned.** The snippet is markup the console renders into its own pages, and the URL in it would name an endpoint this API does not serve yet — returning one would hand the console a script tag pointing at a 404. What this endpoint owes the console is the configuration a snippet is built from.
+- **No embed snippet is returned.** The snippet is markup the console renders into its own pages, and this repo has no opinion on another repo's markup. An earlier version of this note gave a different reason — that the URL in a snippet would name an endpoint that did not exist — and that expired in spec 1.7, when `POST /v1/ask-ai` started serving the widget. What this endpoint owes the console is the configuration a snippet is built from.
+
+### Serving the widget
+
+`POST /v1/ask-ai` is where the widget's questions are answered, and it is the **one AI-assisted endpoint here that is not behind `RequireAdmin`**. That is the feature, not an oversight: the widget belongs to an end user and answers questions about *their own* account — the sessions and audit events on their own row. An operator is also a user of their own account, so an operator's token works too, but it works as an account holder, not as an operator.
+
+```json
+// POST /v1/ask-ai          Authorization: Bearer <any signed-in user's token>
+{ "question": "when did I last log in" }
+// 200
+{ "data": { "answer": "id | created_at\ns-2 | 2026-09-17T09:12:44Z", "row_count": 1 } }
+```
+
+- **The caller's identity is the token and nothing else.** The body has no field that can name a user; one sent anyway is ignored rather than rejected, because there is nothing for it to reach. Two independent things hold that: `widget.Ask` discards whatever identity filter the model produced and substitutes the id this repo verified from the token, and the id itself comes from `RequireAuth` rather than from anything the request can carry. A body that tries to name someone else is the case the tests pin.
+- **`answer` is rendered, not composed.** `widget.Config.Composer` is left nil deliberately, so cryden falls back to `RenderResult` — a deterministic plain-text table over rows that have already been scoped to this one user. Supplying a composer would mean a second model call per question whose output nothing validates, to turn a table into prose. That is worth doing deliberately if it is ever wanted; it is not a default to fall into.
+- **`allowed_origins` is defense in depth, not the boundary.** The Bearer token is the boundary and it is verified first. `Origin` is a header a browser sets and anything that is not a browser sets freely, which is why a request carrying *no* Origin is allowed: refusing it would break every non-browser client — the console, a mobile app, a test — while stopping nobody, since whoever can forge an allowlisted origin can also omit it. What the check does buy is a guard against a stray embed on a site nobody meant to authorise, which would otherwise put one user's answers in front of whoever is browsing that page. Origins are compared on scheme and host with the default port normalised away, so `https://console.example.com:443` and `https://console.example.com` are the same entry rather than one that silently never matches.
+- **Settings are read per question, not cached behind an invalidation.** Three short reads and two AES-GCM opens against one model call that takes hundreds of milliseconds at best — the trade is lopsided, and the failure mode of the other side is a saved settings change that does not take effect until a restart, or takes effect only if every future writer remembers to poke a hook. What *is* cached is the built provider pair, keyed on a SHA-256 digest of the settings it was built from. Hashed rather than held, because two of the three inputs are credentials and a cache key lives as long as the process does.
+- **Building the provider is cheap on purpose.** `aiprovider.NewPostgresSnapshot` uses `sql.Open`, which does not connect, so a rebuild is an allocation rather than a round trip and a stored connection that has since gone bad is reported by the query that uses it. That is what keeps a broken setting from being a startup failure.
+- **Switched off and never configured are one answer** — `404 ask_ai_widget_disabled`. The stored config's zero value is disabled, so there is no way to tell them apart, and there is no reason a caller should care. `404 not_configured` is the different case: the widget is on but the deployment has no LLM provider or no read-only database stored.
+- **It costs money per question and is not rate-limited per user.** It is bounded only by `EDGE_RATE_LIMIT`, which counts requests per edge, not per account. A real per-user limit needs a policy this repo has not decided — the numbers are deployment-specific — so it is recorded as owed in `PROGRESS.md` rather than invented here.
 
 ## Design notes
 

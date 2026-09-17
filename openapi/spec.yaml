@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: CrydenSync API
-  version: "1.6"
+  version: "1.7"
   description: >
     A self-hosted HTTP wrapper around the CrydenSync auth engine.
     Every response follows one of two envelope shapes: {"data": ...}
@@ -85,6 +85,29 @@ info:
     side of the read-only rule. Nothing deletes a review: dismissing is
     a status, and withdrawing a judgement stores "unreviewed" rather
     than removing the row.
+
+    1.7 is additive, and adds the first path here that is neither an
+    authentication mechanic nor admin only: POST /ask-ai, the ask-ai
+    widget's serving endpoint. No existing path, field or status code
+    changed.
+
+    It is gated on authentication rather than on the admin check, and
+    that is the shape of the feature rather than an oversight: the
+    widget answers questions about the caller's OWN account. The
+    identity is the verified token and nothing else — the request body
+    has no field that can name a user, and the engine's widget surface
+    discards whatever identity the model produced and substitutes the
+    one this API verified. 1.5's /admin/settings/ask-ai-widget
+    configures it and stays admin only; which entities it will answer
+    over is one of those settings, and a question naming anything
+    outside that set is refused before any query runs.
+
+    Read-only, like every other AI-assisted surface here: it answers a
+    question and records nothing, and nothing in it can take an action
+    on the caller's account or anyone else's. It is also the first path
+    whose behaviour depends on a settings write taking effect without a
+    restart — it reads the stored provider configuration on every
+    question, so a change saved through 1.5 is in force on the next one.
 servers:
   - url: http://localhost:8080/v1
     description: Local dev
@@ -814,6 +837,32 @@ components:
           maxLength: 200
           description: The input's placeholder text. Optional.
 
+    AskAIAnswer:
+      type: object
+      description: >
+        One answer from the widget, as POST /ask-ai returns it.
+        Deliberately just the text and a row count: the rows are already
+        in `answer`, rendered, and the count is what lets a client say
+        "3 sessions" without parsing the table back out of prose.
+      properties:
+        answer:
+          type: string
+          description: >
+            The answer as plain text — a rendered table of the result
+            rows, with the column names as a header line. Built
+            deterministically from the rows rather than composed by a
+            second model call, so the same question over the same data
+            yields the same string. No rows is the answer "No matching
+            results." rather than an empty string, because "nothing
+            matched" and "the widget failed to answer" must not look the
+            same to a client.
+        row_count:
+          type: integer
+          description: >
+            How many rows `answer` was rendered from, after the
+            deployment's row cap. Zero is a real answer and not an
+            error.
+
   responses:
     BadRequest:
       description: Malformed request body
@@ -1226,6 +1275,106 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404':
           description: api_key_not_found, or api_keys_not_configured when the deployment has no API key store.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /ask-ai:
+    post:
+      summary: Ask the widget a question about your own account
+      description: >
+        Authenticated as an ordinary end user, NOT as an operator. This
+        is the one AI-assisted surface on this API that is not behind
+        the admin check, and that difference is the feature: the answer
+        is about the caller's own sessions and audit events, not about
+        anyone else's.
+
+        The identity is the verified token and nothing else. The request
+        body has no field that can name a user; one sent anyway is
+        ignored rather than rejected, because there is nothing for it to
+        reach. The engine's widget surface additionally discards whatever
+        identity filter the model produced and substitutes the one this
+        API verified, and it will not answer over an entity the
+        deployment has not enabled.
+
+        Which entities this answers over is the `entities` setting on
+        /admin/settings/ask-ai-widget, which stays admin only. A
+        question naming anything outside the configured subset is
+        refused before a query runs.
+
+        Read-only: it answers and records nothing, and nothing here can
+        take an action on any account.
+
+        Answers are rendered from the query result rather than composed
+        by a second model call, so `answer` is a deterministic plain-text
+        table over rows already scoped to this one user.
+
+        Two things worth knowing before calling it. It is slow by the
+        standards of the rest of this API — at minimum one call to the
+        configured model provider — and it costs the deployment money
+        per question, which is why `question` is length-bounded and why
+        this path is the one most worth putting a per-user limit in
+        front of. As of this version it is bounded only by whatever edge
+        rate limit the deployment runs.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question:
+                  type: string
+                  maxLength: 500
+                  description: >
+                    The question in whatever words the end user typed.
+                    Empty or whitespace-only is refused. The 500
+                    character bound is on what the deployment will pay
+                    to have parsed, not on what the model could read.
+      responses:
+        '200':
+          description: An answer scoped to the calling user.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AskAIAnswer' }
+        '400':
+          description: >
+            invalid_question — the question was empty, whitespace only,
+            or over 500 characters. question_not_answerable — the
+            question named an entity this deployment does not answer
+            over. Neither message names the entities that ARE available,
+            because this text reaches whoever is typing at the widget.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: >
+            origin_not_allowed — the request carried an Origin header
+            naming an origin the operator has not allowlisted. This is a
+            guard against an embed on a site nobody meant to authorise,
+            NOT the security boundary; the Bearer token is. A request
+            with no Origin at all is allowed, deliberately: refusing it
+            would break every non-browser client while stopping nobody,
+            since a caller able to forge an allowlisted origin can also
+            simply omit it.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: >
+            ask_ai_widget_disabled — an operator has switched the widget
+            off. This is also the answer when nothing has been
+            configured, because the stored configuration's zero value is
+            disabled and an unconfigured widget is not a different thing
+            to a caller than a deliberately off one. not_configured —
+            the widget is on but the deployment has no LLM provider or
+            no read-only database stored.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
@@ -2384,11 +2533,19 @@ paths:
         operator anyway.
 
         There is deliberately no embed snippet in the response. The
-        snippet is markup the csax+ console renders into its own pages,
-        and the URL in it would name an endpoint this API does not serve
-        yet — so generating one here would hand a console a script tag
-        pointing at a 404. What this endpoint owes the console is the
-        configuration a snippet is built from, which is what it returns.
+        snippet is markup the csax+ console renders into its own pages —
+        the console's markup, the console's styling, the console's
+        script tag — and this API has no opinion on any of those. What
+        this endpoint owes the console is the configuration a snippet is
+        built from, which is what it returns.
+
+        This API served no endpoint for a snippet to point at when that
+        was first written, and since 1.7 it does: /ask-ai serves the
+        widget. The reason for omitting a snippet is therefore no longer
+        that the URL in one would 404 — it is the ownership of the
+        markup. The path is documented here as its own path, which is
+        how a client learns every other path on this API, rather than
+        returned as a string from a settings GET.
 
         Nothing configured yet is a 200 with `enabled: false`, the zero
         value: a console then shows the feature as off rather than

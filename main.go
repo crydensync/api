@@ -17,6 +17,7 @@ import (
 	"github.com/crydensync/cryden/v2/store/postgres"
 
 	"github.com/crydensync/api/anomalyreview"
+	"github.com/crydensync/api/askai"
 	"github.com/crydensync/api/config"
 	"github.com/crydensync/api/digest"
 	"github.com/crydensync/api/httpapi"
@@ -390,6 +391,16 @@ func main() {
 		Settings: settingsSecrets,
 
 		Reviews: reviews,
+
+		// Built over the same Secrets the settings endpoints write
+		// through, so a provider saved in the console is the one the
+		// widget's next question uses. Always constructed, even with no
+		// encryption key: it reads the settings on each question rather
+		// than being wired once at startup, so there is nothing to
+		// re-wire when an operator saves a change — it answers 404
+		// not_configured until then, like every other unconfigured
+		// feature here.
+		AskAI: askai.New(settingsSecrets),
 	})
 	limiter := httpapi.NewEdgeRateLimiter(cfg.EdgeRateLimit, cfg.EdgeRateLimitWindow)
 	handler := httpapi.WithCORS(cfg.CORSOrigins, httpapi.WithEdgeRateLimit(limiter, router))
