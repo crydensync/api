@@ -8,6 +8,7 @@ import (
 	"github.com/crydensync/cryden/v2/store"
 
 	"github.com/crydensync/api/anomalyreview"
+	"github.com/crydensync/api/askai"
 	"github.com/crydensync/api/config"
 	"github.com/crydensync/api/digest"
 	"github.com/crydensync/api/settings"
@@ -92,6 +93,13 @@ type Deps struct {
 	// the judgement lives here rather than in the engine's audit history.
 	// See anomalyreview's package doc.
 	Reviews anomalyreview.Store
+
+	// AskAI backs the ask-ai widget's serving endpoint. Unlike every other
+	// AI-assisted dependency here it is not admin-scoped: it answers the
+	// signed-in end user's questions about their own account. Nil unless
+	// main.go built one; the handler then answers 404 rather than
+	// panicking.
+	AskAI *askai.Service
 }
 
 // NewRouter builds the full route table. Called once from main.go.
@@ -120,6 +128,7 @@ func NewRouter(d Deps) http.Handler {
 	tuning := &TuningHandlers{Audit: d.Audit, Config: d.Config}
 	aiSettings := &SettingsHandlers{Secrets: d.Settings}
 	anomalies := &AnomalyHandlers{Audit: d.Audit, Reviews: d.Reviews}
+	askAI := &WidgetHandlers{Service: d.AskAI}
 
 	mux := http.NewServeMux()
 
@@ -207,6 +216,15 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("DELETE /v1/api-keys/{keyID}", RequireAuth(engine, func(w http.ResponseWriter, r *http.Request) {
 		apiKeys.Revoke(w, r, r.PathValue("keyID"))
 	}))
+
+	// The ask-ai widget. Authenticated as an ordinary end user rather than
+	// an operator, and that is the whole shape of the feature: it answers
+	// questions about the caller's OWN account, scoped by cryden's
+	// widget.Ask to the identity this repo verified from their token. It
+	// sits here among the authenticated routes rather than in the /v1/admin
+	// block below because an end user is not an operator and this is not an
+	// admin surface — see WidgetHandlers.
+	mux.HandleFunc("POST /v1/ask-ai", RequireAuth(engine, askAI.Ask))
 
 	// Admin endpoints. Everything under /v1/admin goes through RequireAdmin
 	// (middleware.go), which needs the `role` claim an operator's token
