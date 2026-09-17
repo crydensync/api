@@ -1,0 +1,17 @@
+# Everything the build stage does not need. The image copies the whole
+# source tree (it has to — Go builds from source), so this is what keeps a
+# developer's local state out of it.
+.git
+.github
+*.md
+docs
+.env
+.env.*
+# A local SQLite database is the one thing that must never end up baked
+# into an image: it is a deployment's live data, and a stale copy in a
+# layer is both a leak and a confusing bug.
+*.db
+*.db-wal
+*.db-shm
+api
+api_server

@@ -1447,3 +1447,85 @@ recorded rather than deleted.
 a constant, not a knob, on purpose. No readiness endpoint separate from
 `/v1/health`, so load-balancer behaviour during the drain is unchanged.
 `go build ./... && go vet ./... && go test ./...` are all clean.
+
+## 2026-09-17 — Tier 7 (distribution: binaries, Docker, migration DX)
+
+On `feat/tier7-distribution`, cut from `fix/graceful-shutdown` (the top of
+the stack, since that change is a prerequisite for the container story —
+see below).
+
+**The spec's premise was half stale, and the half that was stale mattered.**
+It said "there is no migration runner in this repo today, in any form".
+True for Postgres, false for SQLite: cryden ships `sqlite.Migrate` and
+`main.go` had been calling it since Tier 6. So the tier's job turned out to
+be narrower and sharper than "write a migration runner" — write the
+*Postgres* half, and decide what "migrated" means when the two backends
+disagree about who owns the schema. Cryden's own comment on why it ships a
+runner only for SQLite turned out to be the answer to the design question
+rather than an obstacle to it.
+
+**Two deviations from the spec, both tested rather than just commented:**
+
+1. `migrations/sqlite/*.sql` is **not** embedded, though the spec asked for
+   it. Cryden's runner reads cryden's embedded copy; these files would sit
+   in the binary unread. Same guarantee ("the binary never needs the source
+   tree"), no dead weight, and no invitation to the misreading Tier 6's
+   README exists to prevent. `TestTier7TheSQLiteCopiesAreNotEmbedded` pins
+   the absence so a future reader finds the deviation asserted, not just
+   described.
+2. **`--baseline` was added**, which the spec did not anticipate. Every
+   database that already has this schema — including what this repo's own
+   CI built by piping `psql`, and what the README told developers to do —
+   has no `schema_migrations` table, so auto-migration would have started
+   at `001` and died on `relation "users" already exists`. The user chose
+   the explicit flag over boot-time detection when asked; the reasoning is
+   in `baselineMigrations`' comment, and the short version is that
+   detection guesses and its wrong guess is silent and permanent.
+
+**The runner is tested against SQLite, on purpose.** No Postgres exists in
+this environment, so the runner takes an `fs.FS` and the one statement that
+differs between backends, and `migrate_test.go` drives it over in-memory
+SQLite with SQLite-flavoured DDL. Ten tests covering filename order,
+recording, idempotence, only-pending-files-run, rollback-and-no-marker on
+failure, down-migrations never running, baseline recording without running,
+baseline refused on SQLite, the runner creating its own tracking table, and
+the embedded file list. **The untested part is the embedded SQL's contents
+against Postgres** — recorded as owed rather than implied by green tests.
+
+One dependency worth naming, verified in the module cache rather than
+assumed: each file runs as a single `Exec`, so the driver must accept
+multiple statements in one. lib/pq does — `conn.go:956`, `if len(args) ==
+0` takes the simple-query path. Splitting on semicolons is the classic way
+a homegrown runner corrupts a database (dollar-quoting, semicolons in
+literals) and was avoided rather than written.
+
+**Also built**: subcommand dispatch (no arg = serve, so every existing doc
+and CI invocation keeps working; `migrate` = apply and exit, sharing
+`openDatabase` with the server so they cannot connect differently),
+`SKIP_AUTO_MIGRATE` via the existing `envBool`, a multi-stage alpine
+`Dockerfile` with an exec-form `ENTRYPOINT` (a shell-form one would defeat
+the graceful shutdown this was built on top of), `.dockerignore`,
+`release.yml` cross-compiling five platforms plus a `ghcr.io` push with the
+workflow's own token, and README/env docs.
+
+**CI changed in a way that is itself the test**: the `postgresql-client`
+install and the `psql` loop are both gone. CI now starts the server against
+an empty database and everything downstream depends on the migration runner
+having worked. That is strictly stronger than what it replaced — the loop
+proved the SQL parsed, but could not have caught a runner applying files
+out of order, twice, or not at all. Also added `go test ./...`, which CI
+was not running before.
+
+**Not verified, and it is the largest such surface in this repo**: the
+`Dockerfile` and both workflows were never executed — no Docker in this
+environment (`permission denied ... docker.sock`), no Actions runner. They
+are written to be correct by inspection only. The Postgres path has still
+never run anywhere: `001`–`014` remain unapplied, `anomalyreview.PostgresStore`
+has still never executed, and the first real exercise of the Postgres
+runner will be CI's first run on this branch. `-race` still not run.
+`go build ./... && go vet ./... && go test ./...` and `gofmt -l` are clean,
+and the subcommand was exercised by hand on a real SQLite file: `migrate`
+applied cryden's schema and exited 0, a second `migrate` was a no-op,
+`--baseline` was refused with exit 1, `--help` and both bad-argument paths
+printed usage with exit 2, and `SKIP_AUTO_MIGRATE=true` logged the warning
+and served without touching the schema.
