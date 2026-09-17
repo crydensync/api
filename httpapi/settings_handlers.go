@@ -290,12 +290,16 @@ func (h *SettingsHandlers) DeleteDatabaseProvider(w http.ResponseWriter, r *http
 // shows an operator anyway. See settings.AskAIWidgetConfig for why that
 // difference is real rather than an oversight.
 //
-// There is also no embed snippet in the response, deliberately. The
-// snippet is markup the csax+ console renders into its own pages, and the
-// URL in it would name an endpoint this repo does not serve yet — so
-// generating one here would be handing a console a script tag pointing at
-// a 404. What this endpoint owes the console is the configuration the
-// snippet is built from, which is exactly what it returns.
+// There is also no embed snippet in the response. The snippet is markup
+// the csax+ console renders into its own pages, and this package has no
+// opinion on what another repo's pages should contain. An earlier
+// version of this comment gave a different reason — that the URL in a
+// snippet would name an endpoint this repo did not serve yet — and that
+// one has expired: POST /v1/ask-ai serves the widget as of spec 1.7.
+// What this endpoint owes the console is the configuration the snippet
+// is built from, which is exactly what it returns; the path it posts to
+// is in the spec with every other path, rather than returned as a string
+// from here.
 func (h *SettingsHandlers) AskAIWidget(w http.ResponseWriter, r *http.Request) {
 	if !h.Secrets.Configured() {
 		writeErr(w, errSettingsNotConfigured)

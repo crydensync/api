@@ -16,10 +16,16 @@ Tier 2 is done — see the status note under Tier 2 and `PROGRESS.md`'s
 migrations to copy.
 Tier 3 is done, in two stages on `feat/tier3-config-and-endpoints` — see
 the status note under Tier 3 and `PROGRESS.md`'s 2026-09-15 entries.
-Tier 4 is **in progress** on `feat/tier4-ai-admin-endpoints`: Stage 1
-(digest + scheduling + history, support diagnosis, config tuning
-advisor) is built — see the status note under Tier 4. Stage 2 (the LLM
-and database providers, and the ask-AI widget config) is not started.
+Tier 4 is done, both stages, on `feat/tier4-ai-admin-endpoints` — see
+the status note under Tier 4. One thing from Tier 4 was carried forward
+rather than left implicit — the ask-ai widget had configuration but no
+serving endpoint — and **that is now done**, on
+`feat/ask-ai-widget-serving`. It was picked up before Tier 6 rather
+than buried under two new tiers, as the note below asked. See
+`CURRENT-STATE.md`'s section on it; the short version is that the route
+is `RequireAuth` rather than `RequireAdmin`, and the status note under
+Tier 4 below carries a correction about why.
+Tier 5 is done — see the status note under Tier 5 and `PROGRESS.md`.
 
 ---
 
@@ -321,6 +327,23 @@ Two details were decided rather than assumed, and are recorded in
 >   snippet, because the URL in one would name a route this repo does
 >   not serve.
 >
+>   **Superseded.** The serving endpoint was built after Tier 5 on
+>   `feat/ask-ai-widget-serving`: `POST /v1/ask-ai` calls `widget.Ask`,
+>   `allowed_origins` is consulted on every question, and the pair the
+>   widget needs is constructed from the stored settings. Only the last
+>   sentence survives, and only its conclusion — the GET still returns
+>   no embed snippet, but no longer because the URL would 404. The
+>   reason now is that the markup belongs to the console. See
+>   `CURRENT-STATE.md`.
+>
+>   **A correction to this tier's own heading, worth carrying.** Tier 4
+>   is titled "AI-assisted admin endpoints (all behind `RequireAdmin`)",
+>   and that was never true of this item. The widget belongs to the
+>   signed-in end user and answers questions about their own account, so
+>   its route is `RequireAuth`. The heading is true of the *settings*
+>   routes; reading it as covering everything this tier listed is the
+>   mistake the carry-forward note above invited.
+>
 > What is still owed from Stage 1:
 >
 > - the digest schedule is a goroutine on `context.Background()`, because
@@ -531,3 +554,119 @@ tools' suggestions pre-fill.
 endpoint. The Stage 2 widget *configuration* exists, but nothing serves
 an embeddable widget, so `allowed_origins` is still stored and
 unenforced — the same gap `CURRENT-STATE.md` records for Tier 4.
+
+> **Closed.** That endpoint was built after Tier 5 on
+> `feat/ask-ai-widget-serving`; `allowed_origins` is enforced at request
+> time. What is still owed on it is per-user rate limiting, recorded in
+> `CURRENT-STATE.md` and `PROGRESS.md` rather than guessed at here.
+
+---
+
+## Tier 6 — SQLite backend, core auth only
+
+Scope decided in advance, don't relitigate: **core auth only.** Every
+table this repo added on top of cryden for the admin console
+(`operators`, `user_metadata`, `webhook_deliveries`,
+`shipped_log_events`, `digest_runs`, `settings`,
+`reviewed_anomalies`) stays Postgres-only. Whoever reaches for SQLite
+is running something small and is extremely unlikely to also be
+running the AI-assisted admin console — building that whole extra
+table set twice for a case that probably won't use it is real ongoing
+maintenance for close to zero benefit. If that changes later, it's its
+own deliberate tier, not a quiet scope-creep of this one.
+
+- **Config**: a driver switch in `config/config.go` — `DATABASE_URL`
+  (Postgres, as today) or `SQLITE_PATH`, mutually exclusive, refuse to
+  start with both or neither set. `main.go` picks
+  `store/postgres.New*Store` or `store/sqlite.New*Store` accordingly
+  for cryden's own stores (`Users`, `Sessions`, `Audit`,
+  `Verifications`, `OAuth`, `TOTP`, `WebAuthn`, `RecoveryCodes`,
+  `APIKeys`, `Anomalies`) — every one of these already has a
+  `store/sqlite` implementation in cryden v2.5.0, this is wiring, not
+  new engine work.
+- **Migrations**: don't renumber cryden's own SQLite migrations into
+  this repo's Postgres sequence (`001`-`014`) — they're a different
+  backend's schema, not the same history. Copy cryden's
+  `store/sqlite/migrations/*.sql` verbatim into a new
+  `migrations/sqlite/` directory, keeping cryden's own filenames, the
+  same "kept here so this repo is self-contained" reasoning as every
+  other copied migration.
+
+  This is a straight 7-for-7 copy, not a consolidation: cryden's SQLite
+  migrations are `0001`-`0007`, the same count and the same filenames as
+  its Postgres ones. (An earlier version of this bullet claimed they were
+  "consolidated — fewer, larger files than the Postgres ones". They are
+  not, and the warning that followed from it — don't invent fake
+  incremental history — was written against a problem that does not
+  exist here. The instruction to keep cryden's filenames stands; the
+  reason is self-containment, not divergence.) If this repo ever needs
+  its own extra SQLite tables, those get their own numbered files
+  continuing this sequence rather than being folded into a cryden copy.
+- **When `SQLITE_PATH` is set and an admin-console route is hit**:
+  decide and document this explicitly, don't leave it to whatever
+  happens to occur. The straightforward answer is a clean `501
+  not_implemented_on_sqlite` for every route under `/v1/admin/*` that
+  touches a Postgres-only table (which is effectively all of them,
+  since `RequireAdmin` itself depends on `operators`) — so document
+  that the whole admin console, not just parts of it, requires
+  `DATABASE_URL`. Don't let it fail as a confusing 500 from a missing
+  table instead.
+- **Verification**: run cryden's own `store/sqlite` test suite as
+  reference if unsure of a pragma or type mapping before writing
+  anything by hand — see cryden's `store/sqlite/SKILL.md`-equivalent
+  doc comments (`foreign_keys`, `busy_timeout`, `journal_mode(WAL)` are
+  load-bearing DSN pragmas, not optional).
+
+---
+
+## Tier 7 — distribution: binaries, Docker, and migration DX
+
+The goal: `git clone` (or `docker run`), copy the env file, run, no
+separate migrate step, no Go toolchain required for someone who isn't
+a Go developer at all.
+
+**Worth knowing before starting: there is no migration runner in this
+repo today, in any form.** `cmd/` holds only `grant-operator`, there is
+no `embed.FS` anywhere in a non-test Go file, and CI applies migrations
+by piping them through `psql`. So the first two bullets below are
+greenfield rather than an extension of something existing, and the
+"one implementation, called two ways" shape the `migrate` subcommand
+bullet asks for is simply the design — there is no earlier runner to
+avoid duplicating.
+
+- **Embed migrations into the binary** with `embed.FS` — both
+  `migrations/*.sql` (Postgres) and `migrations/sqlite/*.sql` from
+  Tier 6, so the running binary never depends on the source tree being
+  present next to it.
+- **Auto-migrate on startup, on by default.** Before opening the
+  listening port, connect to the configured database, apply any
+  migration that hasn't run yet, in order, then start serving.
+- **`SKIP_AUTO_MIGRATE=true`** as the escape hatch for teams who want a
+  controlled deploy step instead of migrations running silently on
+  every boot. When set, startup skips straight to serving.
+- **A `migrate` subcommand** (`./api migrate`) that only applies
+  pending migrations and exits, no server started — this is what
+  `SKIP_AUTO_MIGRATE=true` deployments use as their explicit step. It
+  uses the same embedded files and the same apply function as the
+  automatic path: one runner written once, called from two places,
+  rather than two implementations of "run migrations" to keep in sync.
+- **Binary releases**: extend the existing `.github/workflows/release.yml`
+  (already triggers on `v*` tags) to cross-compile and attach binaries
+  for `linux/amd64`, `linux/arm64`, `darwin/amd64`, `darwin/arm64`, and
+  `windows/amd64` to the GitHub Release.
+- **Docker image**: a `Dockerfile` (multi-stage: build in a Go image,
+  run from a minimal base), published to a registry on the same tag
+  trigger. `docker run --env-file .env -p 8080:8080 <image>` should be
+  the entire setup instructions.
+- **Graceful shutdown, pulled forward from Tier 3/4's owed list**:
+  this is the tier where it stops being a nice-to-have. A distributed
+  binary or container is exactly what a real orchestrator (Kubernetes,
+  Fly, Railway, plain systemd) sends `SIGTERM` to on every deploy, and
+  right now `main.go` ends at `log.Fatal(ListenAndServe(...))` with the
+  webhook worker and digest scheduler both running on
+  `context.Background()` — nothing stops them cleanly. Wire a real
+  shutdown context, cancel it on `SIGTERM`/`SIGINT`, and give
+  in-flight requests and the background workers a bounded grace period
+  before exiting. Don't ship distribution before this; a container
+  that gets killed mid-migration or mid-webhook-delivery on every
+  rolling deploy is a worse experience than the one being fixed.
