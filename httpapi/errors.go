@@ -43,6 +43,16 @@ var errMissingAuthHeader = errors.New("missing or malformed Authorization header
 // on purpose (see operator/store.go and RequireAdmin).
 var errNotOperator = errors.New("this account does not have console operator access")
 
+// errNotImplementedOnSQLite is returned for every admin route on a
+// SQLite deployment, before the token is even looked at.
+//
+// The admin console's tables are this repo's own and Postgres-only by
+// decision (see NEXT.md Tier 6), and RequireAdmin itself depends on the
+// operators table — so the whole of /v1/admin is unavailable rather
+// than parts of it, and an operator should be told that rather than
+// left to interpret a 403 that suggests they personally lack access.
+var errNotImplementedOnSQLite = errors.New("the admin console requires a Postgres backend; this deployment runs on SQLite")
+
 // errEdgeRateLimited is the coarse, per-IP, whole-API rate limit —
 // distinct from auth.ErrRateLimited, which is the engine's own
 // per-user login/signup limiter. Both surface the same "rate_limited"
@@ -78,6 +88,13 @@ func mapError(err error) apiError {
 		return apiError{http.StatusUnauthorized, "missing_auth_header", "missing or malformed Authorization header"}
 	case errors.Is(err, errNotOperator):
 		return apiError{http.StatusForbidden, "not_operator", "this account does not have console operator access"}
+	// Checked before errNotOperator's neighbours and by no other route:
+	// a SQLite deployment has no admin surface at all, so this is a
+	// statement about the deployment rather than about the caller. 501
+	// rather than 403 for exactly that reason — the caller may well be a
+	// perfectly good operator, on a backend that cannot serve them.
+	case errors.Is(err, errNotImplementedOnSQLite):
+		return apiError{http.StatusNotImplemented, "not_implemented_on_sqlite", "the admin console requires a Postgres backend; this deployment runs on SQLite"}
 	case errors.Is(err, errEdgeRateLimited):
 		return apiError{http.StatusTooManyRequests, "rate_limited", "too many requests, please slow down"}
 	case errors.Is(err, errAdminStoresUnavailable):

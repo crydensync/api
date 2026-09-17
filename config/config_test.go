@@ -52,6 +52,13 @@ var tieredEnvVars = []string{
 func loadForTest(t *testing.T, env map[string]string) (Config, error) {
 	t.Helper()
 	t.Setenv("DATABASE_URL", "postgres://user:pw@localhost/db")
+	// Cleared as well as set, so this helper describes exactly one thing:
+	// a Postgres deployment. Without it a SQLite_PATH set by an earlier
+	// call in the same test would survive into the next one and turn it
+	// into the mutually-exclusive case by accident. A caller wanting the
+	// other backend passes DATABASE_URL:"" and a SQLITE_PATH, which the
+	// env map below applies last.
+	t.Setenv("SQLITE_PATH", "")
 	t.Setenv("JWT_SECRET", "test-secret")
 	t.Setenv("CORS_ORIGINS", "http://localhost:5173")
 	for _, name := range tieredEnvVars {
@@ -401,6 +408,85 @@ func TestTier3WebhookMaxAttemptsIsBounded(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("WEBHOOK_MAX_ATTEMPTS=%s: error = %q, want it to contain %q", value, err, want)
 		}
+	}
+}
+
+// Tier 6: the backend is chosen by exactly one variable, and Load refuses
+// every other combination at startup rather than letting a deployment come
+// up pointed at neither or at both.
+//
+// Both refusals matter for different reasons. Neither set is a deployment
+// that would otherwise reach a nil *sql.DB somewhere deep in startup. Both
+// set is the dangerous one: DATABASE_URL is what the admin console needs
+// and SQLITE_PATH is what the store wiring would read, so silently
+// preferring either would run a deployment on the wrong backend while its
+// configuration said otherwise.
+func TestTier6TheBackendIsSelectedByExactlyOneVariable(t *testing.T) {
+	cfg, err := loadForTest(t, map[string]string{
+		"DATABASE_URL": "",
+		"SQLITE_PATH":  "/var/lib/cryden/api.db",
+	})
+	if err != nil {
+		t.Fatalf("SQLITE_PATH on its own was rejected: %v", err)
+	}
+	if !cfg.UsesSQLite() {
+		t.Error("UsesSQLite() = false with SQLITE_PATH set")
+	}
+	if cfg.SQLitePath != "/var/lib/cryden/api.db" {
+		t.Errorf("SQLitePath = %q, want the value that was set", cfg.SQLitePath)
+	}
+
+	// loadForTest sets DATABASE_URL and no SQLITE_PATH: the Postgres
+	// deployment every other test in this file already describes.
+	cfg, err = loadForTest(t, nil)
+	if err != nil {
+		t.Fatalf("Load() failed with DATABASE_URL and no SQLITE_PATH: %v", err)
+	}
+	if cfg.UsesSQLite() {
+		t.Error("UsesSQLite() = true on a deployment with no SQLITE_PATH")
+	}
+
+	for name, tc := range map[string]struct {
+		env  map[string]string
+		want string
+	}{
+		"neither backend": {
+			map[string]string{"DATABASE_URL": ""},
+			"one of DATABASE_URL or SQLITE_PATH is required",
+		},
+		"both backends": {
+			map[string]string{"SQLITE_PATH": "/var/lib/cryden/api.db"},
+			"mutually exclusive",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := loadForTest(t, tc.env)
+			if err == nil {
+				t.Fatalf("%v was accepted, want a startup failure", tc.env)
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error = %q, want it to contain %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// UsesSQLite is the single expression of the rule, so it is pinned
+// directly: an empty string is "unset", which is what the mutual-exclusion
+// check above treats it as, and a Config built by hand rather than by Load
+// has to answer the same way.
+func TestTier6UsesSQLiteIsTheEmptyCheck(t *testing.T) {
+	if (Config{}).UsesSQLite() {
+		t.Error("a zero Config reports SQLite")
+	}
+	if !(Config{SQLitePath: "api.db"}).UsesSQLite() {
+		t.Error("a Config with SQLitePath set reports Postgres")
+	}
+	// A Postgres URL with no path set is the Postgres backend — the case
+	// that would break if this ever became "SQLitePath == '' means
+	// Postgres OR ..." rather than a plain emptiness check.
+	if (Config{DatabaseURL: "postgres://localhost/db"}).UsesSQLite() {
+		t.Error("a Config with only DatabaseURL set reports SQLite")
 	}
 }
 
