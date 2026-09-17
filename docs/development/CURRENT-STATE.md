@@ -391,9 +391,10 @@ deployment does on its next restart, so it is called out in `README.md`,
 
 The digest's new table (`012`) has **never been applied to a real
 database**, the same as `009`–`011` — there is no Postgres in this
-sandbox — and the digest schedule is a goroutine on
-`context.Background()`, because this repo still has no graceful
-shutdown. `PROGRESS.md` says both plainly.
+sandbox. The digest schedule used to be a goroutine on
+`context.Background()`; it now takes the context the shutdown signal
+cancels, so the paragraph that follows in the Tier 6 section applies here
+too. `PROGRESS.md` says both plainly.
 
 ### Stage 2 — the providers and the widget config
 
@@ -568,9 +569,10 @@ foreign key rather than accepting any id, so that the tested branch is
 the one production runs. `-race` was not run this session.
 
 **Still not built** (unchanged from Tier 4, not part of this tier):
-graceful shutdown, and per-user rate limiting on anything that calls a
-model. The widget's own serving endpoint was in this list when Tier 5
-landed and is not any more — see the next section.
+per-user rate limiting on anything that calls a model. Graceful shutdown
+was on this list and is not any more — see the last section of this file.
+The widget's own serving endpoint was in this list when Tier 5 landed and
+is not any more — see the next section.
 
 ## The ask-ai widget's serving endpoint — carried forward from Tier 4
 
@@ -653,18 +655,18 @@ single most important thing about it.
   see the intent that actually reached the query surface. It is also the
   hook a host running a different LLM backend needs, which is why it is
   exported rather than a test-only accessor.
-- **`Service.Close()` exists and nothing calls it.** There is still no
-  graceful shutdown for it to hang off, so it is there so that adding
-  one does not have to start by widening this type's API.
+- **`Service.Close()` is called by the teardown in `main.go`.** It
+  releases the last cached provider pool, after the server has drained
+  and the background workers have stopped, so no question can be in
+  flight against a provider that is being closed.
 
 **What is still owed, said plainly.** No per-user rate limiting on this
 route: it spends money per question and is bounded only by the global
 per-IP edge limiter. That needs policy — per-user or per-deployment, and
 what number — which is a deployment's call rather than something to
-invent here. `Service.Close()` is never called, for the shutdown reason
-above. The Anthropic provider still has never called Anthropic, so the
-live path from a question to a real model is exercised only through the
-`Providers` seam with doubles; the wire shape is covered by
+invent here. The Anthropic provider still has never called Anthropic, so
+the live path from a question to a real model is exercised only through
+the `Providers` seam with doubles; the wire shape is covered by
 `aiprovider`'s own tests against a local fake.
 
 ## Tier 6 — SQLite backend, core auth only
@@ -753,11 +755,86 @@ this repo's server was started on a real SQLite file and passed the full
 `internal/smoketest` run — health, signup, duplicate rejection, login,
 wrong password, verify, session list, missing-header rejection, refresh
 rotation, reuse detection, family revocation, and both OAuth refusals.
-`-race` was still not run. Graceful shutdown is still unbuilt, and on
-SQLite it now has a second reason to exist: with no `Close()` there is
-no checkpoint on exit, so a fresh deployment's entire schema can sit in
+`-race` was still not run. Graceful shutdown was not built by this tier,
+and on SQLite it had a second reason to exist: with no `Close()` there is
+no checkpoint on exit, so a fresh deployment's entire schema could sit in
 the `-wal` file — durable, but a backup that copies `api.db` alone can
-silently produce an empty database. `README.md` warns about that where
-an operator will see it. Per-user rate limiting on `POST /v1/ask-ai` is
+silently produce an empty database. `README.md` warns about that where an
+operator will see it. That gap is now closed — see the last section of
+this file — but the warning stays, because a `kill -9` still leaves the
+WAL uncheckpointed and the advice to copy all three files is still the
+right advice. Per-user rate limiting on `POST /v1/ask-ai` is
 unchanged.
 
+
+## Graceful shutdown — the finding Tier 3 opened and Tier 6 sharpened
+
+This is not a tier. It is the one item that appeared as owed in three
+separate tier write-ups (Tiers 3, 5 and 6), so it is recorded once, here,
+and the three write-ups now point at it instead of restating it.
+
+**What it was.** `main.go` ended at
+`log.Fatal(http.ListenAndServe(...))`. That single line meant three
+things, and only the first was obvious:
+
+1. **No signal handling.** A `SIGTERM` — which is what every process
+   manager sends, including `docker stop` and a Kubernetes rolling
+   deploy — killed the process where it stood. Every request in flight
+   died with it.
+2. **`os.Exit` runs no defers.** `log.Fatalf` calls `os.Exit(1)`, so the
+   `defer db.Close()` two lines above it had never run once in this
+   repo's life. Every clean shutdown leaked the pool.
+3. **On SQLite, no close means no checkpoint.** The `-wal` file is
+   durable — SQLite recovers from it — but the schema and every row a
+   deployment had written lived only there. After two boots of the
+   smoke run, `api.db` was still 4096 bytes while `api.db-wal` held
+   461KB. A backup that copied `api.db` alone produced an empty
+   database that opened without error.
+
+Only the third is visible from outside, and it is the one that would
+have cost somebody data.
+
+**What it is now.** `signal.NotifyContext` on `SIGINT`/`SIGTERM` produces
+one `appCtx` that everything hangs off. `net.Listen` is separated from
+`srv.Serve` so a listen failure is an error to report rather than a
+`Fatal` that skips teardown. The main goroutine selects on either
+`Serve` returning on its own or the signal; on the signal it calls
+`drain`, which is `srv.Shutdown` bounded by `shutdownDrainTimeout`
+(30s, a constant in `shutdown.go` with its own reasoning) and falls back
+to `srv.Close` when the bound is hit. Only then does teardown run, in
+the order the components need: `stopSignals()`, `workers.Wait()` for the
+webhook worker and the digest scheduler, then `askAI.Close()`,
+`redisClient.Close()`, and `db.Close()` last — that last one being the
+WAL checkpoint.
+
+**The three properties `shutdown_test.go` pins**, because they are the
+whole reason `drain` is a function instead of three lines in `main`:
+
+- A request already in flight still gets its 200 after the signal
+  arrives, and the drain does not return before it finishes. The test
+  waits for the handler to actually be running rather than sleeping, so
+  it is not racing the client.
+- A request that will not finish does not hold the process open. The
+  bound is honored and the error names the wait, because the operator
+  reading it is looking at a deploy that took too long.
+- A listener that fails on its own reports that error rather than
+  having it translated into a clean shutdown by the
+  `http.ErrServerClosed` check.
+
+**Verified end to end, not just by unit test.** The binary was built,
+started on a fresh `/tmp/walcheck.db`, driven through the full
+`internal/smoketest` run (13/13), sent a real `SIGTERM`, and then the
+database was opened **read-only with no sidecar files present**: 7
+migrations recorded, 1 user, 2 sessions, all read back out of the
+single `.db` file. Before the change the same sequence left 4096 bytes
+and a 461KB `-wal`.
+
+**What this does not do.** It does not make `shiplog`'s writes
+asynchronous — the comment there has been updated from "there is no
+shutdown path to hang off" to "the buffer and the flush policy are the
+missing pieces, not the lifecycle", which is a different and smaller
+problem. It does not add a readiness endpoint separate from `/v1/health`,
+so a load balancer's behavior during the drain is unchanged. And
+`shutdownDrainTimeout` is a constant rather than an env var on purpose:
+if the ask-ai widget's model calls ever stop being bounded by the
+provider's own client timeout, that becomes a knob.

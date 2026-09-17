@@ -3,9 +3,15 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"log"
+	"net"
 	"net/http"
+	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	_ "github.com/lib/pq"
@@ -57,7 +63,13 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to open DB connection: %v", err)
 	}
-	defer db.Close()
+	// Deliberately not `defer db.Close()`. Closing the database is the last
+	// step of the teardown at the end of main, for two reasons: a defer
+	// would close it before the background workers have stopped writing
+	// through it, and the log.Fatalf on the failure path calls os.Exit,
+	// which runs no defers at all — so a defer here would silently not
+	// happen in exactly the case where an unclean exit is most likely. On
+	// SQLite that close is also the WAL checkpoint; see the teardown.
 	if err := db.Ping(); err != nil {
 		log.Fatalf("failed to ping DB: %v", err)
 	}
@@ -113,6 +125,24 @@ func main() {
 	}
 
 	st := openStores(cfg, db)
+
+	// The context every long-running thing in this process hangs off, and
+	// the reason it exists: this server is expected to be stopped by a
+	// signal — Ctrl-C in development, SIGTERM from systemd, Kubernetes or
+	// `docker stop` in a deployment — and all three mean "finish what you
+	// are doing and exit", not "die now".
+	//
+	// stopSignals cancels this context as well as unregistering the
+	// handler, which is what the teardown at the bottom of main relies on:
+	// on the signal path the workers have already seen the cancellation,
+	// and on the listener-failure path nothing else would have told them.
+	appCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+
+	// The background workers, tracked so the teardown can wait for them
+	// before closing the database handle they write through. Without the
+	// Wait, "the workers have stopped" would be a hope rather than a fact,
+	// and a delivery landing after db.Close() logs a confusing error.
+	var workers sync.WaitGroup
 
 	// Hoisted into locals rather than constructed inline in the config
 	// literal below, because the router needs these same instances:
@@ -309,12 +339,22 @@ func main() {
 	// actually in force.
 	engineCfg.LockoutThreshold = cfg.LockoutThreshold
 	engineCfg.LockoutDuration = cfg.LockoutDuration
+	// Declared here rather than inside the block below because the teardown
+	// at the end of main closes it, and it is only non-nil when REDIS_URL
+	// asked for it.
+	var redisClient *redis.Client
 	if cfg.RedisURL != "" {
 		redisOpts, err := redis.ParseURL(cfg.RedisURL)
 		if err != nil {
 			log.Fatalf("invalid REDIS_URL: %v", err)
 		}
-		limiter, err := security.NewRedisRateLimiter(redis.NewClient(redisOpts), cfg.RateLimitAttempts, cfg.RateLimitWindow)
+		// Hoisted out of the constructor call below so the teardown can
+		// close it. The client is this process's, not cryden's — the
+		// limiter is handed a client that is already connected and only
+		// ever talks to it through the Scripter interface — so closing it
+		// is this repo's job and nothing else would do it.
+		redisClient = redis.NewClient(redisOpts)
+		limiter, err := security.NewRedisRateLimiter(redisClient, cfg.RateLimitAttempts, cfg.RateLimitWindow)
 		if err != nil {
 			log.Fatalf("failed to build the Redis rate limiter: %v", err)
 		}
@@ -389,17 +429,20 @@ func main() {
 	// The delivery worker. Started only when there is somewhere to
 	// deliver to, so an unconfigured deployment runs no goroutine at all.
 	//
-	// Run takes context.Background() because this repo has no graceful
-	// shutdown anywhere yet — main.go ends at log.Fatal(ListenAndServe),
-	// which exits the process and every goroutine with it. Introducing a
-	// real shutdown touches every component and is its own change; noted
-	// in PROGRESS.md as still owed rather than smuggled in here.
+	// Run takes appCtx, so a shutdown stops it at the same moment it stops
+	// accepting requests rather than after the drain: the two are
+	// independent, and holding a delivery back until the HTTP side has
+	// finished would only delay the exit. A delivery cut off mid-flight is
+	// what the stale reclaim exists for — see RunOnce's own note.
 	if webhookStore != nil {
 		worker := webhook.NewWorker(webhookStore, cfg.WebhookURL, cfg.WebhookSecret)
 		worker.MaxAttempts = cfg.WebhookMaxAttempts
 		worker.Wake = webhookWake
 		worker.Log = log.Default()
-		go worker.Run(context.Background())
+		// WaitGroup.Go (Go 1.25) rather than Add plus a goroutine: the
+		// counter and the goroutine are one statement, so the pairing that
+		// has to stay balanced cannot drift.
+		workers.Go(func() { worker.Run(appCtx) })
 
 		events := len(cfg.WebhookEvents)
 		if events == 0 {
@@ -418,10 +461,10 @@ func main() {
 	// passed in, so the row states the exact interval the engine was asked
 	// to count over rather than one reconstructed from the text afterwards.
 	//
-	// Run takes context.Background() for the same reason the worker does:
-	// this repo still has no graceful shutdown, and that is noted in
-	// PROGRESS.md as owed rather than smuggled in behind a second
-	// goroutine.
+	// Run takes appCtx for the same reason the worker does. A digest cut
+	// off mid-build records nothing and is retried at the next interval,
+	// which is the right outcome — half a window written to the history
+	// would be worse than no row.
 	if digestStore != nil {
 		scheduler := &digest.Scheduler{
 			Store:    digestStore,
@@ -440,9 +483,15 @@ func main() {
 				}, nil
 			},
 		}
-		go scheduler.Run(context.Background())
+		workers.Go(func() { scheduler.Run(appCtx) })
 		log.Printf("scheduled digests enabled: one every %s", cfg.DigestInterval)
 	}
+
+	// Hoisted out of the Deps literal below because the teardown closes it:
+	// the cached provider pair holds a second database connection (the
+	// read-only one behind the AI query surface), and nothing else would
+	// release it. See Service.Close.
+	askAI := askai.New(settingsSecrets)
 
 	router := httpapi.NewRouter(httpapi.Deps{
 		Engine: engine,
@@ -471,13 +520,97 @@ func main() {
 		// re-wire when an operator saves a change — it answers 404
 		// not_configured until then, like every other unconfigured
 		// feature here.
-		AskAI: askai.New(settingsSecrets),
+		AskAI: askAI,
 	})
 	limiter := httpapi.NewEdgeRateLimiter(cfg.EdgeRateLimit, cfg.EdgeRateLimitWindow)
 	handler := httpapi.WithCORS(cfg.CORSOrigins, httpapi.WithEdgeRateLimit(limiter, router))
 
+	// The listener is opened before the server starts serving so a port
+	// already in use is a startup failure that says so, rather than an
+	// error out of Serve after the line below has claimed the API is up.
+	srv := &http.Server{
+		Addr:    ":" + cfg.Port,
+		Handler: handler,
+	}
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		log.Fatalf("failed to listen on %s: %v", srv.Addr, err)
+	}
+
+	// Serve in a goroutine, buffered so it can never block on a receiver
+	// that has already moved on — on the signal path nothing reads this
+	// channel until the drain has finished.
+	listenerErr := make(chan error, 1)
+	go func() {
+		err := srv.Serve(ln)
+		if errors.Is(err, http.ErrServerClosed) {
+			// Shutdown or Close was called, which is the normal way out
+			// of Serve rather than a failure to report.
+			err = nil
+		}
+		listenerErr <- err
+	}()
+
 	log.Printf("api listening on :%s (CORS origins: %v)", cfg.Port, cfg.CORSOrigins)
-	log.Fatal(http.ListenAndServe(":"+cfg.Port, handler))
+
+	var serveErr error
+	select {
+	case serveErr = <-listenerErr:
+		// The listener stopped on its own — a closed socket, a descriptor
+		// limit. Nothing asked it to stop, so there is nothing to drain.
+		log.Printf("server stopped serving: %v", serveErr)
+	case <-appCtx.Done():
+		log.Printf("shutdown signal received: draining in-flight requests (up to %s)", shutdownDrainTimeout)
+		serveErr = drain(srv, shutdownDrainTimeout)
+		// Serve has returned by now on every path Shutdown can take, so
+		// this is where a listener that failed *during* the drain reports
+		// itself — and the buffered channel is why it could not have been
+		// dropped in the gap. A clean drain leaves nil here and keeps
+		// serveErr nil.
+		if err := <-listenerErr; serveErr == nil {
+			serveErr = err
+		}
+	}
+
+	// ---- teardown ----
+	//
+	// Reached on both paths above, and written once rather than deferred
+	// so that the order is visible and deliberate. The order is: stop the
+	// workers, release everything holding a connection to something else,
+	// then close the database last.
+	//
+	// stopSignals cancels appCtx, which is what stops the workers on the
+	// listener-failure path; on the signal path they saw it already. Either
+	// way it happens before anything they write through is closed, and the
+	// Wait is what makes that a fact rather than a likelihood.
+	stopSignals()
+	workers.Wait()
+
+	// The AI query surface's own read-only connection pool. Errors are
+	// logged rather than fatal: by this point the process is leaving, and
+	// a pool that will not close is not a reason to skip the rest.
+	if err := askAI.Close(); err != nil {
+		log.Printf("closing the ask-ai providers: %v", err)
+	}
+	if redisClient != nil {
+		if err := redisClient.Close(); err != nil {
+			log.Printf("closing the Redis client: %v", err)
+		}
+	}
+
+	// Last, and the reason this is not the deferred call it used to be:
+	// closing the database is what checkpoints the WAL on SQLite, and the
+	// os.Exit in log.Fatalf below would skip a defer. On a SQLite
+	// deployment this call is the difference between a schema that is in
+	// api.db and a schema that is only in api.db-wal.
+	if err := db.Close(); err != nil {
+		log.Printf("closing the database: %v", err)
+	}
+
+	if serveErr != nil {
+		log.Fatalf("server: %v", serveErr)
+	}
+	log.Printf("shutdown complete")
 }
 
 // sqliteDSN builds the connection string for SQLITE_PATH.

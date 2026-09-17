@@ -246,9 +246,9 @@ func (s *Service) Ask(ctx context.Context, req Request) (widget.Answer, error) {
 
 // Close releases the connection pool behind the cached providers. The
 // cached pair is replaced and closed on every rebuild, so this is only
-// about the last one — and nothing calls it yet, because this repo still
-// has no graceful shutdown for it to hang off. It exists so that adding
-// one does not have to start by widening this type's API.
+// about the last one — main.go calls it during shutdown, after the server
+// has drained and the background workers have stopped, so no question can
+// be in flight against a provider this is about to close.
 func (s *Service) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
