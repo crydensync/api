@@ -22,11 +22,15 @@ the config tuning advisor; Stage 2 is the AI provider settings — the LLM
 provider, the read-only database and the ask-ai widget config. Tier 4 is
 also where this repo stopped being purely a wrapper: it now ships a live
 `ai.LLMProvider` over the Anthropic SDK and a live `ai.QueryableStore`
-over a second database connection, neither of which is wired to a
-consumer yet. Every admin endpoint here is read-only except the
+over a second database connection. Those two had no consumer when Tier 4
+landed; the ask-ai widget's serving endpoint, carried forward from that
+tier and built after Tier 5, is the consumer — see the section on it
+below. Every admin endpoint here is read-only except the
 `/v1/admin/settings/*` saves, which are the human half of the
 pre-fill-never-auto-apply rule — nothing on that surface applies a
-suggestion by itself.
+suggestion by itself. The widget's serving endpoint is not an admin
+endpoint at all, and is the one AI-assisted surface here that answers an
+end user rather than an operator.
 
 Tier 1 also added the second-factor surface: TOTP enroll/confirm/
 disable, passkey registration/list/delete, magic-link request/complete,
@@ -436,13 +440,15 @@ Three things in this stage are worth reading before touching them:
 
 `aiprovider.NewAnthropic` is a real `ai.LLMProvider` over the official
 Anthropic Go SDK, and `aiprovider.NewPostgresSnapshot` a real
-`ai.QueryableStore`. **Nothing wires either from the stored config yet**:
-the only consumer would be a widget serving endpoint, which does not
-exist, so that glue lands with its first caller rather than being
-written blind. `allowed_origins` is stored and validated but nothing
-consults it at request time for the same reason, and the widget GET
-carries no embed snippet because the URL in one would name a route this
-repo does not serve.
+`ai.QueryableStore`. **Nothing wired either from the stored config when
+this stage landed** — Stage 2 stored the settings and enforced the scope
+but had no caller, so the glue landed with its first one. That caller is
+the widget's serving endpoint, built after Tier 5; see its own section
+below. An earlier version of this paragraph also said `allowed_origins`
+was consulted at no request time and that the widget GET carried no
+embed snippet because the URL in one would name a route this repo does
+not serve — both of those stopped being true at the same moment, and the
+reason the snippet is still not returned is a different one.
 
 What Stage 2 does **not** have evidence for, and `PROGRESS.md` says in
 full: `CheckReadOnly` has never run against a real Postgres (the tested
@@ -553,9 +559,103 @@ verified by reasoning and by the in-memory double, which reproduces the
 foreign key rather than accepting any id, so that the tested branch is
 the one production runs. `-race` was not run this session.
 
-**Still not built** (unchanged from Tier 4, not part of this tier): the
-widget's own serving endpoint, so `allowed_origins` remains stored and
-unenforced; nothing constructs an `ai.LLMProvider` or
-`ai.QueryableStore` from the stored config; and there is still no
-graceful shutdown.
+**Still not built** (unchanged from Tier 4, not part of this tier):
+graceful shutdown, and per-user rate limiting on anything that calls a
+model. The widget's own serving endpoint was in this list when Tier 5
+landed and is not any more — see the next section.
+
+## The ask-ai widget's serving endpoint — carried forward from Tier 4
+
+Built on `feat/ask-ai-widget-serving`, after Tier 5 rather than with it.
+`NEXT.md`'s Tier 4 carry-forward note asked for this to be picked up
+"before or alongside Tier 6/7"; this is that, and it is the piece Tier 4
+Stage 2 deliberately left to its first caller rather than writing blind.
+
+Two new files and two small edits. `askai/` owns the glue — turning the
+settings table into a live `ai.LLMProvider`/`ai.QueryableStore` pair —
+and `httpapi/widget_handlers.go` owns the route. `POST /v1/ask-ai` is
+registered with **`RequireAuth`, not `RequireAdmin`**, which is the
+single most important thing about it.
+
+- **It is not an admin endpoint, and that is the feature.** cryden's
+  `widget` package exists for "a host application's own end users", and
+  `widget.Ask` takes an `ownerUserID` that the host must supply from its
+  own authentication. The widget answers questions about the signed-in
+  user's own sessions and audit events. Putting it behind `RequireAdmin`
+  would have been the easy mistake — every other AI surface here is
+  admin-only — and it would have made the widget unusable for every
+  person it is for. This was checked against three independent sources
+  before the route was written: cryden's `widget/ask.go` package doc and
+  `ownerUserID` contract, `README.md`'s own account of the widget, and
+  `settings/widget.go`'s note that `"*"` is refused because the widget
+  answers questions about the signed-in user. `NEXT.md` Tier 4's heading
+  — "AI-assisted admin endpoints (all behind `RequireAdmin`)" — is true
+  of the *settings* routes and was already misleading as a description
+  of this one, which Tier 4 listed but never built.
+- **The owner id comes from the verified token and from nowhere else.**
+  The request body has no field that can name a user; one sent anyway is
+  ignored rather than rejected, because there is nothing for it to
+  reach. Two things hold that independently: `widget.Ask` discards the
+  model's identity filter and substitutes the real one, and the id
+  itself is read from the request context by `RequireAuth` rather than
+  from anything in the request. `TestAskAIScopesToTheTokenNotTheBody`
+  pins it end to end by sending a body that names another user and
+  asserting the `user_id` filter that reached the query surface was the
+  caller's.
+- **`Composer` is nil, deliberately.** cryden documents a nil Composer
+  as "a valid, strictly safer default" and falls back to `RenderResult`,
+  a deterministic plain-text table. Supplying one means a second model
+  call per question whose output nothing validates, to turn a table into
+  prose. That is a decision to make on purpose if it is ever wanted, not
+  one to fall into by omission.
+- **`allowed_origins` is finally consulted, and it is defense in depth
+  rather than the boundary.** The Bearer token is the boundary and is
+  verified first. A request carrying *no* `Origin` is allowed, on
+  purpose: refusing it would break every non-browser client — the
+  console itself, a mobile app, a test — while stopping nobody, because
+  a caller who can forge an allowlisted origin can equally omit it. What
+  the check buys is a guard against a stray embed on a site nobody meant
+  to authorise.
+- **A real bug the tests caught, worth recording.** The first
+  `canonicalOrigin` used `url.Parse(...).Hostname()`, which ignores the
+  path — so `https://console.example.com/widget` canonicalised to the
+  same key as the allowed origin and was accepted. Fixed by refusing a
+  path, query, fragment or userinfo outright and requiring the scheme be
+  `http`/`https`, which mirrors `settings.validateWidgetOrigin`. The two
+  sides of one rule have to agree; a comparison that silently ignored a
+  path would accept a value the operator could never have stored.
+  Default ports are normalised away on both sides, because browsers omit
+  `:443` and an operator who typed it would otherwise have configured an
+  entry that could never match.
+- **Settings are read per question; the built provider pair is cached on
+  a content fingerprint.** Three short reads and two AES-GCM opens
+  against one model call is a lopsided trade, and the failure mode of
+  the other side is a saved change that does not take effect until a
+  restart. The fingerprint is a **SHA-256 digest**, not the settings
+  themselves, because two of its three inputs are credentials and a
+  cache key lives as long as the process does. Rebuilds are cheap by
+  design — `NewPostgresSnapshot` uses `sql.Open`, which does not connect
+  — so a stored connection that has gone bad is reported by the query
+  that uses it rather than at startup.
+- **The `Providers` seam is exported on purpose.** `askai.New` builds
+  the real Anthropic provider and Postgres snapshot; `NewWithProviders`
+  takes a factory. It exists because the security properties worth
+  testing — owner scoping, entity scoping, rebuild-on-change — cannot be
+  observed without a database otherwise, and the httpapi tests use it to
+  see the intent that actually reached the query surface. It is also the
+  hook a host running a different LLM backend needs, which is why it is
+  exported rather than a test-only accessor.
+- **`Service.Close()` exists and nothing calls it.** There is still no
+  graceful shutdown for it to hang off, so it is there so that adding
+  one does not have to start by widening this type's API.
+
+**What is still owed, said plainly.** No per-user rate limiting on this
+route: it spends money per question and is bounded only by the global
+per-IP edge limiter. That needs policy — per-user or per-deployment, and
+what number — which is a deployment's call rather than something to
+invent here. `Service.Close()` is never called, for the shutdown reason
+above. The Anthropic provider still has never called Anthropic, so the
+live path from a question to a real model is exercised only through the
+`Providers` seam with doubles; the wire shape is covered by
+`aiprovider`'s own tests against a local fake.
 
