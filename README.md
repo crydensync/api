@@ -86,7 +86,9 @@ No migration step exists on SQLite. `main.go` calls cryden's own `sqlite.Migrate
 
 The connection is opened with three pragmas, all of them load-bearing: `foreign_keys(1)` (off by default, so the schema's `ON DELETE` clauses would silently not run), `busy_timeout(5000)` (zero by default, so a concurrent writer gets an immediate `SQLITE_BUSY` instead of waiting), and `journal_mode(WAL)`. The server verifies the first two on every boot with cryden's own `CheckPragmas` and refuses to start if the DSN and the driver have drifted apart.
 
-**Backing up a SQLite deployment means copying `api.db`, `api.db-wal` and `api.db-shm` together**, or checkpointing first. With WAL, recent writes — including, on a fresh deployment, the entire schema — live in the `-wal` file until a checkpoint folds them into the main file, and there is no graceful shutdown here yet to force one on exit. Copying `api.db` alone can silently produce an empty database.
+**Backing up a SQLite deployment means copying `api.db`, `api.db-wal` and `api.db-shm` together**, or checkpointing first. With WAL, recent writes — including, on a fresh deployment, the entire schema — live in the `-wal` file until a checkpoint folds them into the main file. Copying `api.db` alone can silently produce an empty database in that window.
+
+A clean stop is what closes that window: on `SIGTERM` or `SIGINT` the server stops accepting connections, waits up to 30 seconds for the requests already in flight, stops the webhook worker and digest scheduler, and closes the database — which on SQLite is the checkpoint that folds the `-wal` file back into `api.db` and removes the sidecar files. So `systemctl stop`, `docker stop` and Ctrl-C all leave a `api.db` that is complete on its own. A `kill -9`, a crash or a power loss does not, which is why the paragraph above still stands.
 
 ## Second factors
 

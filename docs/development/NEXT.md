@@ -239,9 +239,10 @@ Two details were decided rather than assumed, and are recorded in
 > behaviour is tested against `httptest` and an in-memory double
 > **rather than against Postgres `FOR UPDATE SKIP LOCKED`**, the
 > in-memory double cannot reproduce two workers racing (one mutex), and
-> this repo still has **no graceful shutdown** — owed before the
-> shipped-events sink could move off the request goroutine. `PROGRESS.md`
-> has all of it.
+> this repo has **no graceful shutdown** — built since, see
+> `CURRENT-STATE.md`'s last section; the async-sink half of this note is
+> still owed and is now only about the buffer and the flush policy.
+> `PROGRESS.md` has all of it.
 >
 > Two deliberate deviations from the spec below, both argued in
 > `PROGRESS.md`: `webhook_deliveries` uses a `BIGSERIAL` surrogate
@@ -346,8 +347,9 @@ Two details were decided rather than assumed, and are recorded in
 >
 > What is still owed from Stage 1:
 >
-> - the digest schedule is a goroutine on `context.Background()`, because
->   this repo still has no graceful shutdown.
+> - ~~the digest schedule is a goroutine on `context.Background()`~~ —
+>   built since: it takes the context the shutdown signal cancels, see
+>   `CURRENT-STATE.md`'s last section.
 >
 > Three things this tier changed that were not in the spec below, all
 > recorded because they are behaviour rather than plumbing:
@@ -669,15 +671,13 @@ avoid duplicating.
   run from a minimal base), published to a registry on the same tag
   trigger. `docker run --env-file .env -p 8080:8080 <image>` should be
   the entire setup instructions.
-- **Graceful shutdown, pulled forward from Tier 3/4's owed list**:
-  this is the tier where it stops being a nice-to-have. A distributed
-  binary or container is exactly what a real orchestrator (Kubernetes,
-  Fly, Railway, plain systemd) sends `SIGTERM` to on every deploy, and
-  right now `main.go` ends at `log.Fatal(ListenAndServe(...))` with the
-  webhook worker and digest scheduler both running on
-  `context.Background()` — nothing stops them cleanly. Wire a real
-  shutdown context, cancel it on `SIGTERM`/`SIGINT`, and give
-  in-flight requests and the background workers a bounded grace period
-  before exiting. Don't ship distribution before this; a container
-  that gets killed mid-migration or mid-webhook-delivery on every
-  rolling deploy is a worse experience than the one being fixed.
+- ~~**Graceful shutdown, pulled forward from Tier 3/4's owed list**~~ —
+  built ahead of this tier, on its own branch, because the original
+  reasoning here was that shipping distribution first would ship a
+  container whose every `docker stop` kills in-flight requests.
+  `main.go` no longer ends at `log.Fatal(ListenAndServe(...))`, and both
+  background workers take the context the signal cancels; see
+  `CURRENT-STATE.md`'s last section. **What remains for this tier is the
+  packaging**: the `Dockerfile`'s `ENTRYPOINT` must run the binary
+  directly rather than through a shell, or `docker stop` signals
+  `/bin/sh` and the whole thing gains nothing.

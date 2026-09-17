@@ -37,13 +37,14 @@
 // path the engine logged from. That is a real cost — one insert per
 // record, and a login emits many — and it is not the shape a busy
 // deployment wants. It is the shape this one can have: making it
-// asynchronous needs a buffer, a flush policy and a shutdown path, and
-// this repo has no graceful shutdown anywhere yet (main.go ends at
-// log.Fatal(ListenAndServe)). An asynchronous sink whose buffer is never
-// flushed is a log that silently drops the last records before a crash,
-// which for a log is the failure that matters most. So the honest choice
-// is a bounded synchronous write now, and async logging as its own
-// change alongside the shutdown path, not smuggled in behind this one.
+// asynchronous needs a buffer, a flush policy, and a flush during
+// shutdown. The shutdown now exists (main.go drains, stops the workers,
+// then closes the database), so the missing piece is no longer a
+// lifecycle to hang off — it is the buffer and the flush, and a decision
+// about what happens to records still buffered when the drain times out.
+// Until that is decided, the honest choice is a bounded synchronous write,
+// because a log that silently drops the last records before a crash is the
+// failure that matters most for a log.
 //
 // The level filter in front of the sink is what keeps the volume sane:
 // LOG_LEVEL defaults to info and the engine's debug records — the bulk of
