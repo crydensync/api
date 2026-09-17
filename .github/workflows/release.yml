@@ -7,6 +7,12 @@ on:
 
 permissions:
   contents: write
+  # packages: write is what lets the image below be pushed to ghcr.io with
+  # the workflow's own GITHUB_TOKEN. Without it the push is a 403, and
+  # with it no extra repository secret is needed to publish an image —
+  # which matters because a registry credential someone has to remember to
+  # rotate is one more thing that can quietly expire.
+  packages: write
 
 jobs:
   release:
@@ -43,17 +49,12 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Install postgresql-client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
-
-      - name: Run migrations
-        run: |
-          for f in migrations/*.up.sql; do
-            psql "$DATABASE_URL" -f "$f"
-          done
-        env:
-          DATABASE_URL: postgres://api:api_test@localhost:5432/api_test?sslmode=disable
-
+      # The psql step that used to live here is gone on purpose. The
+      # server now migrates itself on boot, so the smoke test below is
+      # what proves the migration runner works — against a completely
+      # empty database, which is the only way a fresh deployment ever
+      # sees it. Keeping the psql step would have applied the schema by
+      # hand and left the runner on the happy path untested.
       - name: Start server and run smoke test
         run: |
           go build -o api_server .
@@ -66,10 +67,44 @@ jobs:
           CORS_ORIGINS: http://localhost:5173
           PORT: 8080
 
+      # Five platforms, all CGO_ENABLED=0. windows/amd64 is built from
+      # ubuntu because nothing here needs a host toolchain — see the
+      # Dockerfile's note on why that is possible.
+      - name: Cross-compile release binaries
+        run: |
+          set -eu
+          mkdir -p dist
+          for target in \
+            linux/amd64 linux/arm64 \
+            darwin/amd64 darwin/arm64 \
+            windows/amd64
+          do
+            GOOS="${target%/*}"
+            GOARCH="${target#*/}"
+            name="api_${GOOS}_${GOARCH}"
+            [ "$GOOS" = windows ] && name="${name}.exe"
+            echo "building $name"
+            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
+              go build -trimpath -ldflags="-s -w" -o "dist/$name" .
+          done
+          cd dist && sha256sum * > SHA256SUMS
+
+      - name: Build and push the container image
+        run: |
+          set -eu
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker build -t "$image:${GITHUB_REF_NAME}" -t "$image:latest" .
+          docker push "$image:${GITHUB_REF_NAME}"
+          docker push "$image:latest"
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           name: Release ${{ github.ref_name }}
+          files: |
+            dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
