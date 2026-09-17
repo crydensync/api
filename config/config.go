@@ -14,7 +14,10 @@ import (
 )
 
 type Config struct {
+	// DatabaseURL and SQLitePath select the backend and are mutually
+	// exclusive — Load refuses both or neither. See UsesSQLite.
 	DatabaseURL         string
+	SQLitePath          string
 	JWTSecret           string
 	Port                string
 	CORSOrigins         []string
@@ -294,6 +297,19 @@ const (
 	CloudLogRedactionHash = "hash"
 )
 
+// UsesSQLite reports which backend this deployment runs on.
+//
+// It is a method rather than a field so there is exactly one expression
+// of the rule, and every place that needs to branch — main.go's store
+// wiring, RequireAdmin's 501 — asks the same question rather than
+// re-deriving it from SQLitePath and drifting.
+//
+// A SQLite deployment serves core auth only. The admin console's tables
+// are this repo's own and Postgres-only by decision (see NEXT.md Tier
+// 6), and RequireAdmin itself depends on the operators table, so the
+// whole of /v1/admin is unavailable rather than parts of it.
+func (c Config) UsesSQLite() bool { return c.SQLitePath != "" }
+
 // Load reads .env (if present, filling only gaps — real env vars
 // always win) then reads the actual environment. No external
 // dependency for .env parsing — same minimal-loader approach as csax.
@@ -302,6 +318,7 @@ func Load() (Config, error) {
 
 	cfg := Config{
 		DatabaseURL: os.Getenv("DATABASE_URL"),
+		SQLitePath:  os.Getenv("SQLITE_PATH"),
 		JWTSecret:   os.Getenv("JWT_SECRET"),
 		Port:        os.Getenv("PORT"),
 	}
@@ -328,8 +345,11 @@ func Load() (Config, error) {
 		cfg.AccessTokenTTL = time.Duration(n) * time.Minute
 	}
 
-	if cfg.DatabaseURL == "" {
-		return cfg, fmt.Errorf("DATABASE_URL is required")
+	if cfg.DatabaseURL == "" && cfg.SQLitePath == "" {
+		return cfg, fmt.Errorf("one of DATABASE_URL or SQLITE_PATH is required — see README's note on the two backends")
+	}
+	if cfg.DatabaseURL != "" && cfg.SQLitePath != "" {
+		return cfg, fmt.Errorf("DATABASE_URL and SQLITE_PATH are mutually exclusive — set one; the admin console's tables are Postgres-only, so a SQLite deployment serves core auth and nothing under /v1/admin")
 	}
 	if cfg.JWTSecret == "" {
 		return cfg, fmt.Errorf("JWT_SECRET is required")
