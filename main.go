@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -46,14 +47,88 @@ import (
 	"github.com/crydensync/api/webhook"
 )
 
+// usage is what an unrecognised argument prints. It names the two things
+// the binary does rather than listing flags, because there are no flags:
+// `migrate` takes only --baseline and the server takes only env vars.
+const usage = `usage: api [command]
+
+  (no command)   run the server, applying any pending migrations first
+                 unless SKIP_AUTO_MIGRATE=true
+  migrate        apply any pending migrations and exit, starting no server
+                 --baseline  record every embedded migration as already
+                             applied, running none of them. For a Postgres
+                             database that has this schema but no
+                             schema_migrations table — see migrate.go`
+
 func main() {
+	// Dispatch before config.Load, deliberately. `api --help` on a machine
+	// with no .env should print usage, not a complaint about JWT_SECRET,
+	// and `api migrate` with a typo'd command should not half-load a
+	// config first.
+	args := os.Args[1:]
+	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help" || args[0] == "help") {
+		fmt.Println(usage)
+		return
+	}
+
+	switch {
+	case len(args) == 0, len(args) == 1 && args[0] == "serve":
+		serve()
+	case args[0] == "migrate":
+		runMigrate(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s\n", args[0], usage)
+		os.Exit(2)
+	}
+}
+
+// runMigrate is `api migrate`: bring the schema up to date, say what
+// happened, exit. No server, no router, no engine — this is the command a
+// SKIP_AUTO_MIGRATE deployment runs as its controlled deploy step, so it
+// must not be able to start accepting traffic even by accident.
+func runMigrate(args []string) {
+	baselineOnly := false
+	for _, a := range args {
+		switch a {
+		case "--baseline":
+			baselineOnly = true
+		default:
+			fmt.Fprintf(os.Stderr, "unknown flag %q for `migrate`\n\n%s\n", a, usage)
+			os.Exit(2)
+		}
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	// Which backend. config.Load has already refused both-or-neither, so
-	// exactly one of DATABASE_URL and SQLITE_PATH is set here.
+	db, err := openDatabase(cfg)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	var msg string
+	if baselineOnly {
+		msg, err = baseline(ctx, db, cfg.UsesSQLite())
+	} else {
+		msg, err = migrate(ctx, db, cfg.UsesSQLite())
+	}
+	if err != nil {
+		log.Fatalf("migrate: %v", err)
+	}
+	log.Printf("migrate: %s", msg)
+}
+
+// openDatabase opens and pings the configured backend. Shared by the
+// server and `api migrate` so the two cannot drift into connecting
+// differently — a migration applied over a connection with different
+// pragmas is not the same migration.
+func openDatabase(cfg config.Config) (*sql.DB, error) {
+	// config.Load has already refused both-or-neither, so exactly one of
+	// DATABASE_URL and SQLITE_PATH is set here.
 	driver, dsn := "postgres", cfg.DatabaseURL
 	if cfg.UsesSQLite() {
 		driver, dsn = "sqlite", sqliteDSN(cfg.SQLitePath)
@@ -61,38 +136,63 @@ func main() {
 
 	db, err := sql.Open(driver, dsn)
 	if err != nil {
-		log.Fatalf("failed to open DB connection: %v", err)
+		return nil, fmt.Errorf("failed to open DB connection: %w", err)
+	}
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to ping DB: %w", err)
+	}
+	return db, nil
+}
+
+func serve() {
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	db, err := openDatabase(cfg)
+	if err != nil {
+		log.Fatal(err)
 	}
 	// Deliberately not `defer db.Close()`. Closing the database is the last
-	// step of the teardown at the end of main, for two reasons: a defer
+	// step of the teardown at the end of serve, for two reasons: a defer
 	// would close it before the background workers have stopped writing
 	// through it, and the log.Fatalf on the failure path calls os.Exit,
 	// which runs no defers at all — so a defer here would silently not
 	// happen in exactly the case where an unclean exit is most likely. On
 	// SQLite that close is also the WAL checkpoint; see the teardown.
-	if err := db.Ping(); err != nil {
-		log.Fatalf("failed to ping DB: %v", err)
+
+	// Migrations before any store is constructed, because every store
+	// assumes its tables exist. The order matters more than it looks: a
+	// deployment that skips this and finds a missing table later fails at
+	// the first query that touches it, which is a confusing 500 rather
+	// than a clear startup error.
+	if cfg.SkipAutoMigrate {
+		log.Printf("SKIP_AUTO_MIGRATE is set: starting without applying migrations. Run `api migrate` as a separate step — see README's note on migrations")
+	} else {
+		msg, err := migrate(context.Background(), db, cfg.UsesSQLite())
+		if err != nil {
+			log.Fatalf("migration failed: %v", err)
+		}
+		log.Printf("migrate: %s", msg)
 	}
 
 	if cfg.UsesSQLite() {
-		// cryden owns the SQLite schema and ships the runner for it, so
-		// this repo calls that rather than applying its own copy under
-		// migrations/sqlite/ — see that directory's README.md for what
-		// its files are for. Applied before any store is constructed,
-		// because every store assumes its tables exist.
-		if err := sqlite.Migrate(context.Background(), db); err != nil {
-			log.Fatalf("sqlite migration failed: %v", err)
-		}
 		// Both pragmas change behaviour this repo documents, and both
 		// are set in the DSN above, so a failure here means the DSN and
 		// this comment have drifted apart. Fatal rather than logged: a
 		// silent foreign_keys=0 would drop the ON DELETE clauses the
 		// schema depends on, and a silent busy_timeout=0 would turn a
 		// concurrent write into an immediate SQLITE_BUSY.
+		//
+		// Checked even when SKIP_AUTO_MIGRATE is set: this is a property
+		// of the connection, not of the schema, so it is as true for a
+		// deployment that migrates separately as for one that does not.
 		if err := sqlite.CheckPragmas(context.Background(), db); err != nil {
 			log.Fatalf("sqlite connection pragmas are wrong: %v", err)
 		}
-		log.Printf("sqlite backend: %s (schema migrated, pragmas checked)", cfg.SQLitePath)
+		log.Printf("sqlite backend: %s (pragmas checked)", cfg.SQLitePath)
 
 		// RequireAdmin's 501 is what actually keeps the admin console off a
 		// SQLite deployment; these are the env vars an operator would
