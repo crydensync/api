@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/crydensync/cryden/v2"
+
+	"github.com/crydensync/api/config"
 )
 
 type contextKey string
@@ -68,6 +70,10 @@ func UserIDFromContext(r *http.Request) string {
 // someone who was simply never an operator all fail identically here.
 // There is deliberately no separate "not an operator, but otherwise
 // valid" response — that distinction is not the caller's to learn.
+//
+// The router must not call this directly for an admin route; it goes
+// through AdminOnly, which is this on a Postgres deployment and a flat
+// 501 on a SQLite one. See AdminOnly.
 func RequireAdmin(engine *cryden.Engine, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
@@ -113,4 +119,38 @@ func WithCORS(allowedOrigins []string, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// AdminOnly returns the middleware for every route under /v1/admin.
+//
+// On a Postgres deployment it is RequireAdmin. On a SQLite one it is a
+// flat 501 that never looks at the token, and the reason is worth
+// stating because the easy implementation — let RequireAdmin run and
+// deny — would be wrong in a way that takes a while to notice:
+//
+//   - The admin console's tables are this repo's own and Postgres-only
+//     by decision (NEXT.md Tier 6), and RequireAdmin itself depends on
+//     the operators table via the token's "role" claim. A SQLite
+//     deployment therefore has no operators, so no token can carry the
+//     claim, so RequireAdmin would answer 403 not_operator to everyone
+//     including a legitimate operator. That reads as "you personally
+//     lack access" when the truth is "this backend has no console".
+//   - main.go does not wire the claims provider on SQLite for the same
+//     reason, so the 403 would be doubly misleading.
+//
+// Doing it here rather than per-route is the point: a route added later
+// inherits the answer, and there is no second list to keep in sync.
+// Every admin route in the router goes through the value this returns —
+// which is why RequireAdmin's own doc says not to call it directly.
+func AdminOnly(engine *cryden.Engine, cfg config.Config) func(http.HandlerFunc) http.HandlerFunc {
+	if cfg.UsesSQLite() {
+		return func(http.HandlerFunc) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) {
+				writeErr(w, errNotImplementedOnSQLite)
+			}
+		}
+	}
+	return func(next http.HandlerFunc) http.HandlerFunc {
+		return RequireAdmin(engine, next)
+	}
 }

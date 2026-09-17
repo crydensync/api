@@ -1279,3 +1279,117 @@ Stage 2 section both said nothing wires `ai.LLMProvider`/
   entries, as the Tier 5 entry noted. This work added its own path and
   left that gap as it found it, since filling it is a Tier 1
   documentation pass.
+
+## 2026-09-17 — Tier 6 (SQLite backend, core auth only)
+
+Branch `feat/tier6-sqlite-backend`, cut from
+`feat/ask-ai-widget-serving` for the same reason that one was cut from
+`feat/tier5-users-admin-surface`: the tier 2–6 stack is still unmerged
+and this builds on the route table the widget work last touched.
+
+`go build ./...`, `go vet ./...`, `go test ./...` and `gofmt -l` are all
+clean, the full suite. What was verified beyond that is the part worth
+reading, because for the first time since Tier 1 it is more than a green
+build:
+
+- **Cryden's own `store/sqlite` suite passes** (`go test
+  ./store/sqlite/...` in the pinned v2.5.0, 6.5s), run as `NEXT.md`
+  Tier 6 explicitly asked, as reference for the pragmas and type
+  mappings.
+- **This repo's server was started on a real SQLite file and passed the
+  full `internal/smoketest` run** — health, signup, duplicate-signup
+  rejection, login, wrong-password rejection, verify, session list,
+  missing-auth-header rejection, refresh rotation, reuse detection,
+  family revocation, and both OAuth refusals. All 13 checks, over real
+  HTTP, against a deployment built from `SQLITE_PATH`. It was also
+  restarted against the same file to confirm the second-boot path (the
+  one every SQLite deployment takes) is a migration no-op.
+- `GET /v1/admin/users` on that running server returned
+  `501 not_implemented_on_sqlite` with the body the spec documents.
+
+**Not run, said plainly**: no Postgres or Docker in this sandbox
+(`permission denied … unix:///var/run/docker.sock`), so migrations
+`001`–`014` still have never been applied to a real database and
+`anomalyreview.PostgresStore` still has never run. `openStores`'s
+Postgres arm is asserted only to construct every store. `-race` was not
+run.
+
+### The decision `NEXT.md` asked to be made explicitly
+
+**The whole admin console answers 501 on SQLite**, via one middleware —
+`httpapi.AdminOnly` — that all 25 admin registrations go through, so a
+route added later inherits the answer rather than needing to be added to
+a list. The alternative was letting the existing `RequireAdmin` refuse,
+which is the trap this exists to avoid: `RequireAdmin` depends on the
+`operators` table, a SQLite deployment has no operators, so no token can
+carry `role: admin`, so *everyone* — including a real operator on a
+deployment that simply does not use Postgres — would have been told
+`403 not_operator`. That is a statement about the caller, and it is
+false. 501 is a statement about the deployment, and it is true.
+
+### Found while wiring, worth knowing before touching this area
+
+- **Cryden ships the SQLite migration runner.** `sqlite.Migrate` embeds
+  its own `migrations/*.sql` and records them in
+  `cryden_schema_migrations`, so `main.go` calls it and there is no
+  migrate step on this backend. That inverts the Postgres arrangement,
+  where this repo's copies are exactly what an operator applies — the
+  copy in `migrations/sqlite/` here is reference material, not what
+  runs. `migrations/sqlite/README.md` says so at the point of use, and
+  `NEXT.md` Tier 7's "one migration runner called from two places" plan
+  now needs reconciling with the fact that SQLite already has one.
+- **The claims provider had to be skipped on SQLite, not nil-guarded.**
+  `usermeta.ClaimsProvider` dereferences its metadata store on every
+  login; a nil `*usermeta.PostgresStore` passed through the interface is
+  a non-nil interface holding a nil pointer, so it would pass its own
+  nil check and panic on the first query — on every login and every
+  refresh. `claimsProvider` returns nil for that case, which cryden
+  already defines as "this host attaches no extra claims".
+- **The second-factor stores were being constructed as Postgres stores
+  in `main.go`'s engine config**, left over from before the switch
+  (`postgres.NewTOTPStore(db)` and three more). On SQLite that is a
+  store issuing `$1` placeholders against a SQLite file, which fails at
+  the first query rather than at startup. Caught by reading the block
+  back after the refactor, not by a test; all four now come from
+  `openStores` via `st.*` like every other store.
+- **The test for the Postgres-only stores tripped the same typed-nil
+  trap it was checking for**: boxing a nil `*operator.Store` into an
+  `any` in a `map[string]any` produces a non-nil interface. The
+  assertions compare the pointers directly now, and the comment says
+  why.
+- **`go get modernc.org/sqlite` also bumped `golang.org/x/sync`**, as an
+  incidental dependency resolution: `v0.16.0 => v0.22.0`. Nothing in
+  this repo depends on the difference, but it is a change in `go.mod`
+  this tier caused and did not intend, so it is recorded rather than
+  left to be discovered in a diff.
+- **No checkpoint on exit, because there is still no graceful
+  shutdown.** On the smoke-test deployment, `api.db` was still 4096
+  bytes after two boots while `api.db-wal` held 461KB — the schema
+  itself lives in the WAL until something checkpoints it. Nothing is
+  lost (the WAL is durable and SQLite recovers it), but a backup that
+  copies `api.db` alone can silently produce an empty database. This is
+  a second reason for the graceful-shutdown item this log has carried
+  since Tier 3, and `README.md` warns about the backup shape where an
+  operator will see it.
+
+### Docs
+
+- `README.md` gained "The two backends" — the switch, the 501, what is
+  inert on SQLite, the pragmas, and the backup warning — plus a pointer
+  from the admin section and a correction to the migrations paragraph
+  in Getting started, which described the Postgres path as if it were
+  the only one.
+- `CURRENT-STATE.md` gained its Tier 6 section and a paragraph in the
+  summary.
+- `NEXT.md` Tier 6 is marked done, with the two things the spec did not
+  anticipate named.
+- `openapi/spec.yaml` → 1.8. This is the first version here that is not
+  additive in the usual sense: no path, field or success response
+  changed, but every `/admin` path can now answer 501. Documented as a
+  reusable `NotImplementedOnSQLite` response referenced from all 25
+  admin operations, plus an info-section note; `POST /ask-ai`'s 404
+  description now covers the SQLite case. The pre-existing gap — Tier
+  1's TOTP/WebAuthn/magic-link/recovery-code/OAuth paths have no spec
+  entries — was left as found, still a Tier 1 documentation pass.
+- `.env.example` documents the two backends at the top.
+- New `migrations/sqlite/README.md`.

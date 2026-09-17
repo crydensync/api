@@ -7,7 +7,7 @@ Every consumer talks to this over plain HTTP — no Go required. This is what a 
 ## Prerequisites
 
 - Go 1.22+ (check `go.mod` for exact version)
-- A running Postgres instance (local, Docker, or hosted — e.g. Supabase, Neon, RDS)
+- A running Postgres instance (local, Docker, or hosted — e.g. Supabase, Neon, RDS) — or nothing but a writable path, if you run on SQLite (see [The two backends](#the-two-backends))
 
 ## Getting started
 
@@ -19,6 +19,8 @@ go run .
 ```
 
 Run the migrations in `migrations/` against your database first, in order (copies of CrydenSync's own migrations, kept here so this repo is self-contained for local dev and CI — same as `typebook` keeps its own copy). `002_oauth_identities` is required even if you don't use OAuth yet — `NewOAuthStore` is wired into the engine config unconditionally. `004` through `008` are the TOTP, WebAuthn, recovery-code, login-attempt and API-key tables; run them even if you leave `ENCRYPTION_KEY` unset, since `007` is what the engine's credential-stuffing detection reads once Tier 2 wires it up and `008` is what the API-key work will use.
+
+That paragraph is the Postgres path only. On SQLite there is nothing to run by hand — `main.go` calls cryden's own `sqlite.Migrate` at startup. See [The two backends](#the-two-backends).
 
 OAuth is optional. To enable a provider, set its client ID/secret plus `BASE_URL` (used to build the callback URL registered in that provider's console):
 
@@ -56,6 +58,35 @@ APPLE_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\nMIG...\n-----END PRIVATE KEY-----
 - The authorization request pins `response_mode=query`, so the existing GET callback route works unchanged. Consequently the one-time `user` payload (the name Apple sends only on a first authorization) is not captured — this API stores the id_token's email, not names.
 
 All four `APPLE_*` values are required; a partially configured Apple is simply unavailable, like any other unconfigured provider.
+
+## The two backends
+
+This API runs on Postgres or on SQLite, chosen by exactly one environment variable:
+
+```
+DATABASE_URL=postgres://...      # everything
+SQLITE_PATH=/var/lib/cryden/api.db   # core auth only
+```
+
+Setting both is a startup error, and so is setting neither. That is deliberate rather than a convenience: `DATABASE_URL` is what the admin console needs and `SQLITE_PATH` is what the store wiring reads, so quietly preferring one would run a deployment on a backend its own configuration does not describe.
+
+**SQLite runs core auth and nothing under `/v1/admin`.** Signup, login, refresh, sessions, password change, email change, OAuth, TOTP, passkeys, recovery codes, magic links and API keys all work. Every admin route — the whole console: the user surface, metadata, webhook and log history, the digest, support diagnosis, config tuning, flagged-event review, AI settings — answers:
+
+```json
+{"error": {"code": "not_implemented_on_sqlite", "message": "the admin console requires a Postgres backend; this deployment runs on SQLite"}}
+```
+
+with `501`, before the token is looked at. This is one decision applied in one place (`httpapi.AdminOnly`), not a list of routes to maintain: the admin console's tables are this repo's own and Postgres-only, and `RequireAdmin` itself depends on the `operators` table, so there is no partial console to offer and no way for a SQLite deployment to have an operator at all. A `403 not_operator` would have been the easy answer and the wrong one — it tells a legitimate operator they personally lack access when the truth is that this backend has no console.
+
+The one AI surface that is *not* under `/v1/admin` is `POST /v1/ask-ai`, which serves the widget to a signed-in end user. It is still unavailable on SQLite, because the provider behind it lives in the Postgres-only `settings` table: it answers `404 not_configured`, the same shape it gives on a Postgres deployment that has not configured a provider. One rule, stated once: **the AI-assisted surface needs `DATABASE_URL`.**
+
+These variables are accepted but inert on SQLite, and the server says so at startup rather than letting an operator wonder — `SETTINGS_ENCRYPTION_KEY`, `WEBHOOK_URL`, `CLOUD_LOGGING`, `DIGEST_INTERVAL_HOURS`. `ENCRYPTION_KEY` is *not* in that list: TOTP and passkeys are cryden's own tables and work on both backends.
+
+No migration step exists on SQLite. `main.go` calls cryden's own `sqlite.Migrate` at startup, which embeds its migrations and records what it applied, so a second boot is a no-op. The copy of those files under `migrations/sqlite/` is reference material, not what runs — see the README in that directory.
+
+The connection is opened with three pragmas, all of them load-bearing: `foreign_keys(1)` (off by default, so the schema's `ON DELETE` clauses would silently not run), `busy_timeout(5000)` (zero by default, so a concurrent writer gets an immediate `SQLITE_BUSY` instead of waiting), and `journal_mode(WAL)`. The server verifies the first two on every boot with cryden's own `CheckPragmas` and refuses to start if the DSN and the driver have drifted apart.
+
+**Backing up a SQLite deployment means copying `api.db`, `api.db-wal` and `api.db-shm` together**, or checkpointing first. With WAL, recent writes — including, on a fresh deployment, the entire schema — live in the `-wal` file until a checkpoint folds them into the main file, and there is no graceful shutdown here yet to force one on exit. Copying `api.db` alone can silently produce an empty database.
 
 ## Second factors
 
@@ -208,6 +239,8 @@ Authenticated endpoints expect `Authorization: Bearer <access_token>`.
 ## Admin endpoints
 
 Everything under `/v1/admin` requires an **operator** token: a valid access token whose `role` claim is `admin`. Operator status is this repo's own concept, not cryden's — it lives in its own `operators` table (`migrations/003_operators.*.sql`), and the claim is attached to the token at issue time by the `AccessTokenClaims` provider in `main.go`. An ordinary user's token carries no `role` claim at all, so "revoked operator", "never was one" and "no such user" are indistinguishable to a caller, deliberately.
+
+On a SQLite deployment this entire section is unavailable and every route in it answers `501 not_implemented_on_sqlite` — the console's tables are Postgres-only. See [The two backends](#the-two-backends).
 
 The first operator is created with `cmd/grant-operator`, from a machine with direct database access — deliberately not an HTTP bootstrap route, which would be needless attack surface reachable over the network:
 

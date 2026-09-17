@@ -564,6 +564,17 @@ unenforced — the same gap `CURRENT-STATE.md` records for Tier 4.
 
 ## Tier 6 — SQLite backend, core auth only
 
+> **Done.** Built on `feat/tier6-sqlite-backend`. Every bullet below
+> landed as written; the `501` decision is `httpapi.AdminOnly`, applied
+> once in the router rather than per route. Two things this section did
+> not anticipate are recorded in `CURRENT-STATE.md`'s Tier 6 section and
+> worth knowing before touching this area: cryden ships its own SQLite
+> migration runner (`sqlite.Migrate`), so `migrations/sqlite/` here is
+> reference material rather than what gets applied; and the
+> `AccessTokenClaims` provider had to be skipped on SQLite entirely,
+> since handing `usermeta.ClaimsProvider` a nil metadata store would
+> panic on every login rather than degrade.
+
 Scope decided in advance, don't relitigate: **core auth only.** Every
 table this repo added on top of cryden for the admin console
 (`operators`, `user_metadata`, `webhook_deliveries`,

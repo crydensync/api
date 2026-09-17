@@ -32,6 +32,14 @@ suggestion by itself. The widget's serving endpoint is not an admin
 endpoint at all, and is the one AI-assisted surface here that answers an
 end user rather than an operator.
 
+Tier 6 made the database a choice: this API runs on Postgres or on
+SQLite, picked by exactly one of `DATABASE_URL` and `SQLITE_PATH`. A
+SQLite deployment serves core auth and nothing else — the whole admin
+console answers `501 not_implemented_on_sqlite`, because every table it
+reads is Postgres-only. See that section below; the one-sentence version
+is that a small deployment can now skip Postgres entirely, and skipping
+it costs the console.
+
 Tier 1 also added the second-factor surface: TOTP enroll/confirm/
 disable, passkey registration/list/delete, magic-link request/complete,
 recovery-code generation, and the three public completion endpoints a
@@ -658,4 +666,98 @@ above. The Anthropic provider still has never called Anthropic, so the
 live path from a question to a real model is exercised only through the
 `Providers` seam with doubles; the wire shape is covered by
 `aiprovider`'s own tests against a local fake.
+
+## Tier 6 — SQLite backend, core auth only
+
+Built on `feat/tier6-sqlite-backend`. This repo runs on Postgres or on
+SQLite, chosen by exactly one variable. The scope decision was made in
+advance rather than here — `NEXT.md`'s Tier 6 section carries it — and
+this is the resulting state.
+
+**The switch.** `DATABASE_URL` or `SQLITE_PATH`, mutually exclusive,
+with `config.Load` refusing both or neither as a startup error.
+`Config.UsesSQLite()` is the single expression of the rule; `main.go`'s
+`openStores` returns one `stores` struct built from cryden's
+`store/postgres` or `store/sqlite` constructors, and nothing downstream
+of it knows which ran. The ten engine stores (`Users`, `Sessions`,
+`Audit`, `Verifications`, `OAuth`, `TOTP`, `WebAuthn`, `RecoveryCodes`,
+`APIKeys`, `Anomalies`) exist in both cryden packages, so this is wiring
+rather than engine work — the one asymmetry is this repo's own three
+Postgres-only stores, which are nil on SQLite.
+
+**The whole admin console answers `501 not_implemented_on_sqlite`**, and
+that is one decision in one place rather than a list of routes:
+`httpapi.AdminOnly` is `RequireAdmin` on Postgres and a flat 501 on
+SQLite, and all 25 admin registrations go through the value it returns.
+The reason it is a 501 and not the 403 the existing gate would have
+produced is the part worth keeping: `RequireAdmin` depends on the
+`operators` table, so a SQLite deployment has no operators, so *every*
+caller — including a legitimate operator — would have been told
+`403 not_operator`. That reads as "you personally lack access" when the
+truth is "this backend has no console". 501 is a statement about the
+deployment, which is what this is.
+
+- The console's tables (`operators`, `user_metadata`,
+  `webhook_deliveries`, `shipped_log_events`, `digest_runs`, `settings`,
+  `reviewed_anomalies`) remain Postgres-only, by the scope decision.
+  Nothing was built twice.
+- **`POST /v1/ask-ai` is not under `/v1/admin` and is still unavailable
+  on SQLite** — the provider it reads lives in the `settings` table. It
+  answers `404 not_configured`, the same shape it gives on a Postgres
+  deployment with no provider stored, so a client never has to know
+  which backend it is talking to. One rule: the AI-assisted surface
+  needs `DATABASE_URL`.
+- **The `AccessTokenClaims` provider is skipped entirely on SQLite.**
+  This is not an optimisation. `usermeta.ClaimsProvider` dereferences
+  its metadata store on every login, and a nil `*usermeta.PostgresStore`
+  passed through the interface is a non-nil interface holding a nil
+  pointer — it would pass its own nil check and panic on the first
+  query, on every login and every refresh. `claimsProvider` returns nil
+  for the SQLite case, which is the correct answer rather than a
+  workaround: cryden treats a nil provider as "this host attaches no
+  extra claims", and on SQLite there is nothing to attach. The
+  consequence is the same fact as the 501 seen from the other end — a
+  SQLite deployment issues tokens no admin route would accept anyway.
+- **Nothing is inert silently.** `SETTINGS_ENCRYPTION_KEY`,
+  `WEBHOOK_URL`, `CLOUD_LOGGING` and `DIGEST_INTERVAL_HOURS` are named
+  in a startup warning when set on SQLite. `ENCRYPTION_KEY` gets its own
+  positive log line precisely so it cannot be misread as part of that
+  list: second factors are cryden's own tables and work on both
+  backends.
+
+**Migrations on SQLite are cryden's, not this repo's.** This is the
+discovery that shaped the tier: cryden ships `sqlite.Migrate`, which
+embeds its own `migrations/*.sql` and records what it applied in
+`cryden_schema_migrations`, so `main.go` calls that at startup and there
+is no migrate step for an operator on this backend. The copy under
+`migrations/sqlite/` — cryden's `0001`–`0007`, verbatim, cryden's
+filenames kept rather than renumbered into this repo's `001`–`014`
+Postgres sequence — is therefore **reference material, not what runs**.
+The mirror image of Postgres, where this repo's copies are exactly what
+an operator pipes through `psql`. `migrations/sqlite/README.md` says so
+at the point of use. Three DSN pragmas are load-bearing:
+`foreign_keys(1)`, `busy_timeout(5000)` and `journal_mode(WAL)`; the
+server checks the first two on every boot with cryden's own
+`CheckPragmas` and refuses to start if the DSN and the driver have
+drifted apart.
+
+**What is still owed, said plainly.** The Postgres path is **not**
+newly verified: `openStores`'s Postgres arm is asserted to construct
+every store, but no Postgres was reachable in this environment, so
+migrations `001`–`014` still have never been applied to a real database
+and `anomalyreview.PostgresStore` still has never run — the same
+constraint Tiers 4 and 5 recorded. The SQLite path, by contrast, is
+verified end to end: cryden's own `store/sqlite` suite passes (run as
+the spec asked, as reference for the pragmas and type mappings), and
+this repo's server was started on a real SQLite file and passed the full
+`internal/smoketest` run — health, signup, duplicate rejection, login,
+wrong password, verify, session list, missing-header rejection, refresh
+rotation, reuse detection, family revocation, and both OAuth refusals.
+`-race` was still not run. Graceful shutdown is still unbuilt, and on
+SQLite it now has a second reason to exist: with no `Close()` there is
+no checkpoint on exit, so a fresh deployment's entire schema can sit in
+the `-wal` file — durable, but a backup that copies `api.db` alone can
+silently produce an empty database. `README.md` warns about that where
+an operator will see it. Per-user rate limiting on `POST /v1/ask-ai` is
+unchanged.
 
