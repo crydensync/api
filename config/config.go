@@ -18,6 +18,7 @@ type Config struct {
 	// exclusive — Load refuses both or neither. See UsesSQLite.
 	DatabaseURL         string
 	SQLitePath          string
+	SkipAutoMigrate     bool
 	JWTSecret           string
 	Port                string
 	CORSOrigins         []string
@@ -351,6 +352,7 @@ func Load() (Config, error) {
 	if cfg.DatabaseURL != "" && cfg.SQLitePath != "" {
 		return cfg, fmt.Errorf("DATABASE_URL and SQLITE_PATH are mutually exclusive — set one; the admin console's tables are Postgres-only, so a SQLite deployment serves core auth and nothing under /v1/admin")
 	}
+
 	if cfg.JWTSecret == "" {
 		return cfg, fmt.Errorf("JWT_SECRET is required")
 	}
@@ -415,12 +417,24 @@ func Load() (Config, error) {
 	// separate secrets with separate lifetimes.
 	cfg.SettingsEncryptionKey = os.Getenv("SETTINGS_ENCRYPTION_KEY")
 
+	// Declared here rather than just above its first use because the
+	// auto-migration switch below needs it too, and that one belongs next
+	// to the rest of what a deployment says about its database.
+	var err error
+
+	// Auto-migration. Defaults to false, so a deployment migrates on boot
+	// unless it says otherwise; the opt-out is for teams who want schema
+	// changes to be a reviewed, separate step rather than something that
+	// happens silently during a rolling deploy. `api migrate` is the step.
+	if cfg.SkipAutoMigrate, err = envBool("SKIP_AUTO_MIGRATE", false); err != nil {
+		return cfg, err
+	}
+
 	// Anomaly detection and credential-stuffing detection — one switch,
 	// because they are one store. Both threshold sets begin as the
 	// engine's defaults and every knob below only replaces the one it
 	// names (see the field comments for why that ordering is not
 	// cosmetic).
-	var err error
 	if cfg.AnomalyDetection, err = envBool("ANOMALY_DETECTION", false); err != nil {
 		return cfg, err
 	}
