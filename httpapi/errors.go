@@ -9,9 +9,11 @@ import (
 	"github.com/crydensync/cryden/v2/auth"
 	"github.com/crydensync/cryden/v2/store"
 	"github.com/crydensync/cryden/v2/token"
+	"github.com/crydensync/cryden/v2/widget"
 
 	"github.com/crydensync/api/aiprovider"
 	"github.com/crydensync/api/anomalyreview"
+	"github.com/crydensync/api/askai"
 	"github.com/crydensync/api/settings"
 	"github.com/crydensync/api/usermeta"
 )
@@ -53,6 +55,12 @@ var errEdgeRateLimited = errors.New("too many requests")
 // fault, so it answers 404 like every other unconfigured feature in this
 // API rather than a 500 an operator would read as a bug.
 var errAdminStoresUnavailable = errors.New("this report requires stores that are not configured on this deployment")
+
+// errAskAIUnavailable is the same wiring fact as errAdminStoresUnavailable
+// one surface over: a router built without an askai.Service cannot serve
+// the widget. 404 for the same reason — nothing is wrong with the server,
+// the feature simply is not configured here.
+var errAskAIUnavailable = errors.New("the ask-ai widget is not configured on this deployment")
 
 // The following three are local, API-layer-only errors from the
 // OAuth redirect/callback flow itself — never returned by the engine,
@@ -187,6 +195,33 @@ func mapError(err error) apiError {
 		return apiError{http.StatusBadRequest, "database_role_not_read_only", "that database role can write, so it cannot back the AI query surface — create a role with SELECT only and use that"}
 	case errors.Is(err, aiprovider.ErrCannotVerifyReadOnly):
 		return apiError{http.StatusBadRequest, "database_role_unverified", "could not verify that the database role is read-only, so it was not stored — check the connection string and that the role can connect"}
+	// The ask-ai widget's serving side. Three of these are the same
+	// "not enabled here" family as the settings endpoints above: a
+	// deployment that has switched the widget off, or switched it on
+	// without configuring a provider, answers 404 so a console hides the
+	// launcher rather than reporting a fault.
+	//
+	// The entity refusal is one case covering two sentinels from two
+	// packages, and that is deliberate. aiprovider.ErrEntityOutOfScope is
+	// the deployment's own scope setting refusing, and
+	// widget.ErrEntityNotAvailable is cryden's fail-closed default for an
+	// entity it has not been taught to bound to one user. A caller can
+	// distinguish neither, and must not: the message names no entity and
+	// no scope, because it reaches an end user and describing this
+	// deployment's schema to whoever is typing questions at it is exactly
+	// what aiprovider.ScopedProvider exists to avoid.
+	case errors.Is(err, errAskAIUnavailable):
+		return apiError{http.StatusNotFound, "not_configured", "the ask-ai widget is not available on this deployment"}
+	case errors.Is(err, askai.ErrWidgetDisabled):
+		return apiError{http.StatusNotFound, "ask_ai_widget_disabled", "the ask-ai widget is switched off on this deployment"}
+	case errors.Is(err, askai.ErrNotConfigured):
+		return apiError{http.StatusNotFound, "not_configured", "the ask-ai widget is not available on this deployment"}
+	case errors.Is(err, askai.ErrOriginNotAllowed):
+		return apiError{http.StatusForbidden, "origin_not_allowed", "this page is not allowed to embed the ask-ai widget"}
+	case errors.Is(err, askai.ErrInvalidQuestion):
+		return apiError{http.StatusBadRequest, "invalid_question", "that question is empty or too long — see the message for which"}
+	case errors.Is(err, aiprovider.ErrEntityOutOfScope), errors.Is(err, widget.ErrEntityNotAvailable):
+		return apiError{http.StatusBadRequest, "question_not_answerable", "the widget cannot answer that kind of question on this deployment"}
 	// A stored credential this deployment's key cannot open. Distinct
 	// from "not configured" on purpose: the row is still there, and
 	// telling an operator it is missing would send them to re-enter a
