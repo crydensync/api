@@ -451,8 +451,11 @@ has never called Anthropic (it is tested against a local fake in the
 Messages API's wire shape), and `013_settings` has never been applied to
 a database.
 
-**The read-only rule now has a named exception, and it is this one.**
-`/v1/admin/settings/*` is the admin surface's first write. The reading
+**The read-only rule has a named exception, and this is the second one.**
+The settings routes are writes, but they were not the admin surface's
+first — Tier 3's `PUT`/`DELETE /v1/admin/users/{userID}/metadata/{key}`
+have written since then, and Tier 5's `PUT /v1/admin/anomalies/{eventID}`
+is a third. The reading
 is that `CLAUDE.md`'s rule covers the AI *tools* — which cryden builds
 through interfaces carrying no way to act — rather than every route
 under `/v1/admin`, and that a settings save is exactly what `NEXT.md`'s
@@ -462,10 +465,97 @@ a suggestion as input. The alternative readings (store the key in
 cryden, or environment-only) are worse and one of them is explicitly
 ruled out by `NEXT.md`, which says this repo owns that config storage.
 
-## Tier 5
+## Tier 5 — the users admin surface
 
-Not started. See `NEXT.md` for the full, ordered, specced-in-detail
-queue — the users admin surface, which has no engine gap and is just
-missing endpoints, plus the widget's own serving endpoint, which is what
-the Stage 2 config above is waiting for.
+Built on `feat/tier5-users-admin-surface`. Four endpoints, one migration,
+one new package. `NEXT.md`'s Tier 5 section carries the same account of
+what was and was not done; this is the state rather than the log.
+
+**The user surface** — `GET /v1/admin/users` and `GET
+/v1/admin/users/{userID}`. This is the one place in the API where an
+operator can see an account that is not their own, so what is absent is
+as load-bearing as what is present: no lock, no unlock, no password
+reset, no delete. cryden's store exposes `LockAccount`, and wiring it to
+a button would make this repo the thing that can lock somebody out of
+their account.
+
+- The email search is **exact and case-sensitive**, and every response
+  says which mode produced it (`match: "exact_email"` or `"browse"`).
+  `q` goes to `cryden.GetUser`, which is `WHERE email = $1`; cryden
+  stores addresses as typed and has no `citext`. Partial search was
+  declined rather than deferred: a `LIKE` against cryden's `users` table
+  would be a second, silent definition of what a user is. A search that
+  finds nothing is an empty 200, never a 404.
+- `locked` is **computed** from `LockedUntil` rather than mirrored from
+  the column, because cryden clears a lockout by time passing rather
+  than by writing a null — a non-nil `locked_until` in the past is the
+  normal state of an account somebody just waited out.
+- `active_sessions` is a count, not a list. `ListByUser` returns only
+  live sessions so the count is honest; listing them would publish every
+  IP and user agent to anyone holding an operator token.
+- `PasswordHash` is on the struct these are built from and never on the
+  wire. `TestAdminUserResponsesNeverCarryAPasswordHash` asserts that
+  against the raw body and proves the assertion is not vacuous by
+  confirming the stored user really does have a hash.
+
+**The MFA adoption report** — `GET /v1/admin/security/mfa-adoption`,
+alongside the hash-migration report it is modelled on. It reports
+enrolment and removal **events**, all-time and windowed, against the
+user total, and derives **no adoption percentage**. cryden cannot answer
+"how many accounts have a factor enrolled": `TOTPStore` and
+`WebAuthnCredentialStore` are per-user with no `Count` and no `ListAll`,
+and counting the rows in `totp_secrets` would be SQL against the
+engine's schema. Every field is named `*_events` so the number cannot be
+read as a user count. Recovery codes are excluded — they are a fallback
+for an account that already has a factor, not a factor of their own.
+
+**The flagged-event review queue** — `GET /v1/admin/anomalies` and `PUT
+/v1/admin/anomalies/{eventID}`, backed by the new `anomalyreview/`
+package and migration `014_reviewed_anomalies`. Two decisions were
+settled by the human before it was written:
+
+- **Dismiss is a status, not a delete.** `status IN
+  ('unreviewed','confirmed','dismissed')`, no DELETE anywhere.
+  Withdrawing a judgement stores `unreviewed` rather than removing the
+  row, so the record of who looked survives the change of mind.
+- **The queue is keyed on the audit event id**, and the existence check
+  is carried by a foreign key from `reviewed_anomalies.event_id` to
+  `audit_events.id` — cryden has no lookup by event id, so Go cannot
+  check it and the database does. SQLSTATE `23503` maps to
+  `404 audit_event_not_found`, reusing the repo's existing
+  SQLSTATE-by-code precedent from `aiprovider/query.go`.
+- **Confirming takes no action on any account** — no lock, no revoke, no
+  threshold change. There is no machinery here that acts, which is what
+  keeps this inside `CLAUDE.md`'s rule rather than being an exception to
+  it.
+- The queue is the two `signals`-carrying types (`anomaly_detected`,
+  `credential_stuffing_detected`); widening it to the failure events
+  around them would make the audit table the queue.
+- Paging over-fetches `limit + offset` per type and refuses beyond 500
+  rather than clamping; `has_more` means "this page came back full, ask
+  again" and not "there is more", because the fetches give a window per
+  type rather than a total.
+
+**The third write on the admin surface.** The review endpoint joins
+Tier 3's metadata `PUT`/`DELETE` and Tier 4's settings routes. The
+reading recorded in Tier 4's section — that the rule covers the AI
+*tools* rather than every route under `/v1/admin` — is unchanged, and
+this tier is the first place the reading had to do real work rather than
+just explain a settings form: a review is a record of a human judgement,
+and the endpoint is built so that it cannot become an action.
+
+**What is still owed, said plainly.** Migration `014` has **never been
+applied to a database**, and `anomalyreview.PostgresStore` has never run
+against a real Postgres — no Docker or Postgres was reachable in the
+environment this was built in, the same constraint Tier 4's Stage 2
+recorded for `013_settings`. The foreign key and its `23503` mapping are
+verified by reasoning and by the in-memory double, which reproduces the
+foreign key rather than accepting any id, so that the tested branch is
+the one production runs. `-race` was not run this session.
+
+**Still not built** (unchanged from Tier 4, not part of this tier): the
+widget's own serving endpoint, so `allowed_origins` remains stored and
+unenforced; nothing constructs an `ai.LLMProvider` or
+`ai.QueryableStore` from the stored config; and there is still no
+graceful shutdown.
 

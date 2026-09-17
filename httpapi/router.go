@@ -7,6 +7,7 @@ import (
 	"github.com/crydensync/cryden/v2"
 	"github.com/crydensync/cryden/v2/store"
 
+	"github.com/crydensync/api/anomalyreview"
 	"github.com/crydensync/api/config"
 	"github.com/crydensync/api/digest"
 	"github.com/crydensync/api/settings"
@@ -42,6 +43,11 @@ type Deps struct {
 	// records against the user total.
 	Audit store.AuditStore
 	Users store.UserStore
+
+	// Sessions backs the live-session count on GET
+	// /v1/admin/users/{userID}. The same instance the engine holds, so
+	// the count describes the sessions the engine would revoke.
+	Sessions store.SessionStore
 
 	// Meta backs the per-user metadata endpoints. This repo's own table
 	// and package — cryden's store.User has no metadata concept and will
@@ -79,6 +85,13 @@ type Deps struct {
 	// not_configured rather than accepting one they would have to store in
 	// the clear. See settings.Secrets.
 	Settings *settings.Secrets
+
+	// Reviews backs the flagged-event review queue. This repo's own table
+	// (migrations/014) and package — cryden records that a login tripped
+	// anomaly signals and has no concept of a person having read one, so
+	// the judgement lives here rather than in the engine's audit history.
+	// See anomalyreview's package doc.
+	Reviews anomalyreview.Store
 }
 
 // NewRouter builds the full route table. Called once from main.go.
@@ -99,12 +112,14 @@ func NewRouter(d Deps) http.Handler {
 	apiKeys := &APIKeyHandlers{Engine: engine}
 	security := &SecurityHandlers{Audit: d.Audit, Users: d.Users, Config: d.Config}
 	metadata := &MetadataHandlers{Users: d.Users, Meta: d.Meta}
+	users := &UserHandlers{Engine: engine, Users: d.Users, Sessions: d.Sessions, Audit: d.Audit}
 	hooks := &WebhookHandlers{Store: d.Hooks}
 	logging := &LoggingHandlers{Store: d.Shipped}
 	digests := &DigestHandlers{Engine: engine, Store: d.Digests}
 	support := &SupportHandlers{Engine: engine}
 	tuning := &TuningHandlers{Audit: d.Audit, Config: d.Config}
 	aiSettings := &SettingsHandlers{Secrets: d.Settings}
+	anomalies := &AnomalyHandlers{Audit: d.Audit, Reviews: d.Reviews}
 
 	mux := http.NewServeMux()
 
@@ -199,12 +214,37 @@ func NewRouter(d Deps) http.Handler {
 	// this repo's own logic — cryden has no concept of a provider being
 	// reachable, and no bulk way to read stored hash algorithms.
 	//
-	// Every endpoint here is read-only, and has to stay that way — the one
-	// exception is the /v1/admin/settings/* block at the bottom of this
-	// table, which is a settings save and not an action any AI tool can
-	// reach. See CLAUDE.md's hard rule about the admin surface.
+	// Read-only is the default and every write here is deliberate. There
+	// are three, and each is a named exception rather than a category: the
+	// per-user metadata block below (a write is the whole feature), the
+	// flagged-event review block (an operator recording a judgement they
+	// made by hand), and the settings block at the bottom (a settings
+	// save, the one path a tuning suggestion may pre-fill). None is
+	// reachable from an AI tool, which is what CLAUDE.md's hard rule
+	// actually protects. See README's note on the admin surface.
 	mux.HandleFunc("GET /v1/admin/oauth/health", RequireAdmin(engine, oauthHealth.Health))
 	mux.HandleFunc("GET /v1/admin/security/hash-migration", RequireAdmin(engine, security.HashMigration))
+	// Second-factor enrolment, as the engine's own audit events against the
+	// user total. Reports events rather than users, and says so — cryden
+	// has no count of accounts with a factor enrolled, and getting one from
+	// here would mean SQL against the engine's schema. See MFAAdoption.
+	mux.HandleFunc("GET /v1/admin/security/mfa-adoption", RequireAdmin(engine, security.MFAAdoption))
+
+	// The user surface — finding an account, and reading one account's
+	// state. Read-only: there is no lock, unlock, password reset or
+	// delete here, deliberately (see UserHandlers). This is the only
+	// place an operator sees an account that is not their own, so the
+	// detail view reports a lockout and cannot clear one, and shows a
+	// session count rather than an account's devices.
+	//
+	// GET /v1/admin/users is registered without a trailing segment and
+	// the detail route with one, which Go's ServeMux distinguishes; the
+	// metadata routes below are more specific still and win over the
+	// detail route for their own paths.
+	mux.HandleFunc("GET /v1/admin/users", RequireAdmin(engine, users.List))
+	mux.HandleFunc("GET /v1/admin/users/{userID}", RequireAdmin(engine, func(w http.ResponseWriter, r *http.Request) {
+		users.Detail(w, r, r.PathValue("userID"))
+	}))
 
 	// Per-user metadata — the table behind JWT claim mapping. Per key
 	// rather than a whole-map PUT, so two operators editing different
@@ -259,8 +299,22 @@ func NewRouter(d Deps) http.Handler {
 	// settings path. See TuningHandlers and CLAUDE.md's hard rule.
 	mux.HandleFunc("GET /v1/admin/config-tuning", RequireAdmin(engine, tuning.ConfigTuning))
 
-	// The AI settings surface — the only writes under /v1/admin, and the
-	// "human saves it" half of pre-fill-never-auto-apply.
+	// The flagged-event review queue — what the engine flagged, and what a
+	// human decided about it. GET is read-only; PUT records a judgement
+	// and nothing else, which is the third write on this surface. A
+	// confirmation takes no action on any account, deliberately: there is
+	// no machinery here that acts, so there is nothing for a confirm
+	// button to trigger. See AnomalyHandlers.
+	mux.HandleFunc("GET /v1/admin/anomalies", RequireAdmin(engine, anomalies.List))
+	mux.HandleFunc("PUT /v1/admin/anomalies/{eventID}", RequireAdmin(engine, func(w http.ResponseWriter, r *http.Request) {
+		anomalies.Review(w, r, r.PathValue("eventID"))
+	}))
+
+	// The AI settings surface — the "human saves it" half of
+	// pre-fill-never-auto-apply, and the third of the three write blocks
+	// on this surface (the others are the per-user metadata block and the
+	// flagged-event review block above; an earlier version of this comment
+	// claimed there was only one, which was wrong).
 	//
 	// The read-only rule above is about the AI *tools*, which are what the
 	// engine's interfaces make read-only by carrying no method that can
