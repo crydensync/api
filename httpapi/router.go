@@ -129,6 +129,7 @@ func NewRouter(d Deps) http.Handler {
 	aiSettings := &SettingsHandlers{Secrets: d.Settings}
 	anomalies := &AnomalyHandlers{Audit: d.Audit, Reviews: d.Reviews}
 	askAI := &WidgetHandlers{Service: d.AskAI}
+	docs := NewDocsHandler()
 
 	// The gate for every route under /v1/admin, resolved once. On a
 	// Postgres deployment this is RequireAdmin; on a SQLite one it is a
@@ -147,6 +148,20 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("POST /v1/refresh", auth.Refresh)
 	mux.HandleFunc("POST /v1/email/confirm-change", email.ConfirmChange)
 	mux.HandleFunc("GET /v1/health", health.Health)
+
+	// The API's own reference documentation, served from assets embedded in
+	// the binary — no CDN, no second static host, and no config. Public on
+	// purpose: a reference document is what a caller reads before they have
+	// a token. Unaffected by AdminOnly, so a SQLite deployment serves the
+	// same docs a Postgres one does; see DocsHandler.
+	//
+	// Two registrations rather than one because Go's ServeMux has no single
+	// pattern for "this exact path and everything under it" — a subtree
+	// pattern ending in a slash would answer /v1/docs with a redirect to
+	// /v1/docs/ instead of the page.
+	mux.HandleFunc("GET /v1/docs", docs.Page)
+	mux.HandleFunc("GET /v1/docs/openapi.yaml", docs.Spec)
+	mux.HandleFunc("GET /v1/docs/{asset}", docs.Asset)
 
 	// Second-factor login completion — public for the same reason
 	// /v1/login is: this IS how the caller gets authenticated. Each of
