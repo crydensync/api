@@ -1,0 +1,2726 @@
+openapi: 3.0.3
+info:
+  title: CrydenSync API
+  version: "1.8"
+  description: >
+    A self-hosted HTTP wrapper around the CrydenSync auth engine.
+    Every response follows one of two envelope shapes: {"data": ...}
+    on success, or {"error": {"code": ..., "message": ...}} on
+    failure. `code` is the stable string to branch on programmatically
+    — never parse `message`.
+
+    1.1 is the named-sessions change: GET /sessions gained `label`,
+     `device` and `location` on each entry (Tier 2). The four fields it
+     already returned keep their names and types, so a client reading
+     only those is unaffected; a client that validates the object
+     against an exhaustive schema is not.
+
+    1.2 is additive: API key management (POST/GET /api-keys and
+    DELETE /api-keys/{keyID}) plus GET /admin/security/hash-migration.
+    No existing path, field or status code changed.
+
+    1.3 is additive: per-user metadata for JWT claim mapping
+    (GET/PUT/DELETE /admin/users/{userID}/metadata), the webhook
+    delivery log (GET /admin/webhooks/deliveries) and the
+    shipped-events log (GET /admin/logging/recent). Every one is admin
+    only. No existing path, field or status code changed — but note
+    that PUT and DELETE /admin/users/{userID}/metadata/{key} are this
+    API's first endpoints that change what a subsequent token for
+    another user will contain. See that path's description.
+
+    1.4 is additive: the weekly security digest and the history of the
+    ones the schedule built (GET /admin/digest, GET
+    /admin/digest/history), the support-ticket assistant (GET
+    /admin/support/diagnose) and the config tuning advisor (GET
+    /admin/config-tuning). All four admin only. None changes any
+    existing path, field or status code, and none can take an action —
+    the digest endpoint records nothing at all, the diagnosis cannot
+    unlock the account it describes, the tuning advisor answers GET and
+    nothing else and its suggestions pre-fill a settings field for a
+    human to save rather than being applied, and only a background job
+    this API runs writes the digest history.
+
+    1.5 is additive: the AI provider settings (GET/PUT/DELETE
+    /admin/settings/llm-provider, /admin/settings/database-provider and
+    /admin/settings/ask-ai-widget). No existing path, field or status
+    code changed, and 1.5 adds no new kind of thing — 1.3's metadata
+    PUT/DELETE already wrote, so the admin surface was not read-only
+    before this version and this version does not change that. The
+    writes here are the "human saves it" half of the pre-fill rule 1.4
+    describes — a tuning suggestion pre-fills one of these forms and an
+    operator saves it — and they are the only place a credential is
+    stored. PUT database-provider additionally verifies against the
+    database itself that the supplied role cannot write, and refuses to
+    store the connection until the server has rejected one; see that
+    path's description for why the check is done there and not in the
+    console.
+
+    1.5 is also the first version whose responses depend on a
+    deployment setting that is not a cryden one: all three paths answer
+    404 not_configured unless SETTINGS_ENCRYPTION_KEY is set, since
+    without that key there is nowhere safe to put a credential.
+
+    1.6 is additive: the admin user surface (GET /admin/users, GET
+    /admin/users/{userID}), the second-factor adoption report (GET
+    /admin/security/mfa-adoption) and the flagged-event review queue
+    (GET /admin/anomalies, PUT /admin/anomalies/{eventID}). No existing
+    path, field or status code changed.
+
+    Two of those are worth reading before the paths. GET /admin/users
+    searches by exact email only, case-sensitively, and says so in its
+    response: the engine stores addresses exactly as typed and compares
+    them with SQL's `=`, so partial or case-insensitive search is not a
+    gap left for later but a query this API declines to write against
+    the engine's own table. GET /admin/security/mfa-adoption reports
+    enrolment and removal EVENTS rather than users and derives no
+    adoption percentage, for the same reason: the engine has no count of
+    accounts with a factor enrolled, so a ratio built from events would
+    be a number that looks like coverage and is not.
+
+    PUT /admin/anomalies/{eventID} is a write, and is the third kind of
+    write on this API's admin surface, after 1.3's metadata and 1.5's
+    settings. It records an operator's judgement about an event the
+    engine flagged and takes no action on any account — there is no
+    machinery in this API that can, which is what keeps it on the right
+    side of the read-only rule. Nothing deletes a review: dismissing is
+    a status, and withdrawing a judgement stores "unreviewed" rather
+    than removing the row.
+
+    1.7 is additive, and adds the first path here that is neither an
+    authentication mechanic nor admin only: POST /ask-ai, the ask-ai
+    widget's serving endpoint. No existing path, field or status code
+    changed.
+
+    It is gated on authentication rather than on the admin check, and
+    that is the shape of the feature rather than an oversight: the
+    widget answers questions about the caller's OWN account. The
+    identity is the verified token and nothing else — the request body
+    has no field that can name a user, and the engine's widget surface
+    discards whatever identity the model produced and substitutes the
+    one this API verified. 1.5's /admin/settings/ask-ai-widget
+    configures it and stays admin only; which entities it will answer
+    over is one of those settings, and a question naming anything
+    outside that set is refused before any query runs.
+
+    Read-only, like every other AI-assisted surface here: it answers a
+    question and records nothing, and nothing in it can take an action
+    on the caller's account or anyone else's. It is also the first path
+    whose behaviour depends on a settings write taking effect without a
+    restart — it reads the stored provider configuration on every
+    question, so a change saved through 1.5 is in force on the next one.
+
+    1.8 is the SQLite backend, and it is the first version here that
+    is not additive in the usual sense: no path was added, removed or
+    reshaped, and no success response changed, but every path under
+    /admin can now answer 501 not_implemented_on_sqlite on a
+    deployment started with SQLITE_PATH instead of DATABASE_URL. That
+    is one decision rather than 25: the console's tables (operators,
+    user_metadata, webhook_deliveries, shipped_log_events,
+    digest_runs, settings, reviewed_anomalies) are Postgres-only, and
+    RequireAdmin depends on operators, so the entire console is
+    unavailable rather than parts of it. A client that reads 501 from
+    an /admin path as "this operator lacks access" will be misreading
+    it — the deployment has no console for anyone, including a
+    legitimate operator. The alternative considered was letting the
+    existing 403 happen, which would have said exactly that misleading
+    thing to every caller on such a deployment.
+
+    Everything outside /admin works on both backends, with one
+    exception worth naming because it is not an /admin path: POST
+    /ask-ai answers 404 not_configured on SQLite, since the provider
+    configuration it reads lives in the Postgres-only settings table.
+    That 404 is the same shape the path already gives on a Postgres
+    deployment with no provider configured.
+
+    A SQLite deployment issues tokens normally, so a client cannot
+    detect the backend from an auth response — only from an /admin
+    path's 501, or from that 404 on POST /ask-ai.
+servers:
+  - url: http://localhost:8080/v1
+    description: Local dev
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    Tokens:
+      type: object
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+
+    Session:
+      type: object
+      description: >
+        An active session. `label`, `device` and `location` are derived
+        on read from the session's own ip and user_agent — nothing is
+        stored for them and no migration exists. `label` is never empty:
+        a client that renders only one string per row should render that
+        one.
+      properties:
+        id: { type: string, format: uuid }
+        ip: { type: string }
+        user_agent: { type: string }
+        created_at: { type: string, format: date-time }
+        label:
+          type: string
+          description: >
+            Human-readable description of the session, e.g.
+            "Chrome on macOS" or "Chrome on macOS — San Francisco, CA"
+            once a geolocator is configured. "Unknown device" when the
+            User-Agent was unparseable or absent.
+        device:
+          type: object
+          description: The User-Agent parsed into its parts, each "" when unrecognised.
+          properties:
+            browser: { type: string, description: 'e.g. "Chrome", "Safari", "curl"' }
+            os: { type: string, description: 'e.g. "macOS", "Windows", "iOS"' }
+            form: { type: string, description: 'desktop, mobile, tablet or bot; "" when it cannot be told' }
+        location:
+          type: object
+          description: >
+            Always present, all fields empty unless a geolocator is
+            configured. No geolocator is wired by default — this repo
+            ships none, since every implementation calls somebody else's
+            internet service.
+          properties:
+            city: { type: string }
+            region: { type: string }
+            country: { type: string }
+
+    OAuthProviderHealth:
+      type: object
+      description: One provider's row in GET /admin/oauth/health.
+      properties:
+        provider: { type: string, description: 'google, github, microsoft, discord, gitlab or apple' }
+        configured:
+          type: boolean
+          description: >
+            Whether this deployment has credentials for the provider. False
+            means it cannot log anyone in and no probe was made.
+        status:
+          type: string
+          enum: [ok, degraded, unreachable, not_configured]
+          description: >
+            ok — the authorize endpoint answered below 500 (a bare GET
+            legitimately gets a 4xx); degraded — it answered 5xx;
+            unreachable — no HTTP response at all; not_configured — no
+            credentials, so nothing was probed.
+        http_status: { type: integer, description: Omitted when no response was received. }
+        latency_ms: { type: integer, description: Omitted when no probe ran. }
+        error: { type: string, description: Transport error; present only for unreachable. }
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            message: { type: string }
+
+    APIKey:
+      type: object
+      description: >
+        A machine-to-machine credential belonging to one user. Note what
+        is absent: no field here can reproduce the key itself. The raw
+        value is returned exactly once, by POST /api-keys, and only its
+        SHA-256 hash is stored.
+      properties:
+        # Quoted because the description contains braces: inside a flow
+        # mapping `{...}` an unquoted `{keyID}` opens a nested mapping and
+        # the document stops parsing. Fixed while adding 1.3 — the file had
+        # never been through a parser.
+        id: { type: string, format: uuid, description: 'What DELETE /api-keys/{keyID} takes.' }
+        name: { type: string, description: Host-supplied label; not required to be unique or non-empty. }
+        prefix:
+          type: string
+          description: >
+            The leading, non-secret fragment of the raw key
+            ("ck_a1b2c3d4"), stored in the clear so a UI can say which
+            key is which without holding the key. Not a lookup key.
+        scopes:
+          type: array
+          items: { type: string }
+          description: >
+            Host-defined permission strings, stored and returned
+            verbatim — the engine never interprets one. Always an array,
+            never null, so a client can iterate without a nil check. No
+            endpoint in this API enforces them yet.
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Null for a key that never expires, which is the default.
+        expired:
+          type: boolean
+          description: >
+            The server's own answer to "is this still usable" — the same
+            comparison made when the key is used, so the two can never
+            disagree. Sent rather than left for a client to derive from
+            expires_at.
+        created_at: { type: string, format: date-time }
+        last_used_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >
+            Null until the key is first used. Written at most once every
+            five minutes, so it answers "is anything still using this?"
+            rather than "when exactly was the last request".
+
+    HashMigration:
+      type: object
+      description: >
+        How far a password-hash migration has got, counted from the
+        engine's own audit events against the user total. Read-only.
+      properties:
+        hasher:
+          type: object
+          description: >
+            What this deployment is configured to WRITE — read from
+            config, never from the users table. The engine exposes no
+            bulk way to inspect stored hash algorithms.
+          properties:
+            algorithm: { type: string, enum: [bcrypt, argon2id] }
+            memory_kib: { type: integer, description: Omitted entirely for bcrypt. }
+            iterations: { type: integer, description: Omitted entirely for bcrypt. }
+            parallelism: { type: integer, description: Omitted entirely for bcrypt. }
+        total_users: { type: integer }
+        upgraded_events:
+          type: integer
+          description: >
+            Counts EVENTS, not users. A user whose hash is rewritten
+            twice — a second cost increase a year later — contributes
+            two, so this number can exceed total_users.
+        estimated_remaining:
+          type: integer
+          description: >
+            total_users - upgraded_events, floored at zero. Estimated:
+            it is only a distinct-user count if every user upgraded
+            exactly once, which is the normal case and not a guarantee.
+        window_days: { type: integer, description: 1-365, default 7. }
+        upgraded_events_in_window:
+          type: integer
+          description: >
+            The field that answers "is this draining" — the all-time
+            count only ever rises, while a windowed one falls to zero as
+            the last stragglers log in.
+
+    UserMetadata:
+      type: object
+      description: >
+        Every metadata key set on one user, plus the names that may not
+        be used. The keys here are not merely stored: they are merged
+        into every access token issued for this user from now on, which
+        is what the console's claim-mapping screen is for. A change
+        therefore lands on the user's next login or refresh — the same
+        latency an operator grant has — and never retroactively over a
+        token already issued.
+      properties:
+        user_id: { type: string, format: uuid }
+        metadata:
+          type: object
+          additionalProperties: true
+          description: >
+            Key to value, values being arbitrary JSON preserved exactly
+            as written — an object stays an object, and an explicit null
+            is stored as null rather than being dropped. Always
+            present; an empty object means the user has no keys set.
+        reserved_claim_names:
+          type: array
+          items: { type: string }
+          description: >
+            The names a write will be refused for: the seven registered
+            JWT claims (iss, sub, aud, exp, nbf, iat, jti) and this
+            API's own "role". Sent so a client can grey these out
+            instead of letting an operator discover the rule by being
+            rejected. Read from the engine and this repo's own claim
+            set, so it stays true as either changes.
+
+    MFAAdoption:
+      type: object
+      description: >
+        Second-factor enrolment and removal as the engine's own audit
+        events, all-time and over a window, against the user total.
+        Read-only.
+
+        This is deliberately not "N of M users have MFA", and the reason
+        is worth stating: the engine's TOTP and WebAuthn credential
+        stores are per-user with no count and no list-all, so it cannot
+        be asked how many accounts have a factor enrolled. Counting the
+        rows directly would answer it and would mean querying the
+        engine's own tables. So no percentage is derived anywhere here —
+        a ratio of events to users would be a number that looks like
+        coverage and moves for the wrong reasons.
+      properties:
+        total_users: { type: integer }
+        window_days: { type: integer, description: 1-365, default 7. }
+        factors:
+          type: array
+          description: One entry per factor, in a stable order.
+          items:
+            type: object
+            properties:
+              factor: { type: string, enum: [totp, passkey] }
+              enrolled_events: { type: integer }
+              removed_events: { type: integer }
+              enrolled_events_in_window: { type: integer }
+              removed_events_in_window: { type: integer }
+            description: >
+              Every field counts events, not users. A user who turns TOTP
+              on, loses their phone and turns it off contributes one
+              enrolment and one removal and is enrolled zero times over,
+              so enrolled_events is not an adoption figure. Recovery
+              codes are not a factor here: they are a fallback for an
+              account that already has one.
+
+    AdminUser:
+      type: object
+      description: >
+        One account, as the console sees it. PasswordHash is on the store
+        struct this is built from and is deliberately not on this schema
+        — a struct tag is not a guarantee, so the handler's own test
+        asserts against the raw body for any hash-shaped field.
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        failed_attempts: { type: integer }
+        locked:
+          type: boolean
+          description: >
+            Computed from the lockout deadline, not mirrored from the
+            stored column. The engine clears a lockout by time passing
+            rather than by writing a null, so a row can carry a
+            locked_until that is already in the past — exactly the case
+            somebody just waited out, and the one an operator most needs
+            reported correctly.
+        locked_until:
+          type: string
+          format: date-time
+          nullable: true
+
+    AdminUserList:
+      type: object
+      properties:
+        users:
+          type: array
+          items: { $ref: '#/components/schemas/AdminUser' }
+        total: { type: integer }
+        limit: { type: integer }
+        offset: { type: integer }
+        match:
+          type: string
+          enum: [exact_email, browse]
+          description: >
+            How this page was produced. "exact_email" means the list is
+            the single account whose email equals the query byte for
+            byte; "browse" means no query was given. It is in the
+            response because the surprising half is otherwise invisible:
+            the email match is exact AND case-sensitive, so
+            "Alice@example.com" does not find an account created as
+            "alice@example.com". A console can label the result and
+            explain a zero-result search rather than leaving an operator
+            to conclude the account is gone.
+        query: { type: string, description: The search that produced this page, empty when browsing. }
+
+    AdminUserDetail:
+      type: object
+      properties:
+        user: { $ref: '#/components/schemas/AdminUser' }
+        active_sessions:
+          type: integer
+          description: >
+            A count, not a list, deliberately. The engine's session store
+            returns only live sessions, so the count is honest; listing
+            them would publish every IP and user agent an account has
+            signed in from to anyone holding an operator token.
+        recent_activity:
+          type: array
+          description: The account's own audit history, newest first, capped at 20.
+          items: { $ref: '#/components/schemas/AuditEvent' }
+
+    AuditEvent:
+      type: object
+      description: >
+        One event as the engine recorded it. Metadata is passed through
+        unchanged: its keys are the engine's ("signals",
+        "distinct_accounts", "from"/"to"), they differ per event type,
+        and a host that renamed them would be inventing a second
+        vocabulary for the engine's own records.
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string }
+        ip: { type: string }
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+        created_at: { type: string, format: date-time }
+
+    AnomalyReview:
+      type: object
+      description: >
+        What a human decided about one flagged event. A row in this API's
+        own table, keyed on the audit event id — the engine's event reads
+        exactly the same before and after a review, because a review is
+        never a write to the engine's audit history.
+
+        Nothing here deletes. Dismissing sets a status; withdrawing a
+        judgement sets it back to "unreviewed", which is stored rather
+        than represented by a missing row, so the record that somebody
+        looked and who they were survives the change of mind.
+      properties:
+        status: { type: string, enum: [unreviewed, confirmed, dismissed] }
+        note: { type: string, description: Always present, empty when there is none. }
+        reviewer_id:
+          type: string
+          format: uuid
+          description: >
+            Omitted for an event nobody has called. The reviewer is the
+            authenticated operator, taken from the verified token and
+            never from the body.
+        updated_at:
+          type: string
+          format: date-time
+          description: Omitted for an event nobody has called, so a zero timestamp is never read as a very old decision.
+
+    Anomaly:
+      type: object
+      description: >
+        One queue row: the engine's event plus what a human said about it.
+        The review is nested rather than flattened so the two halves stay
+        visibly separate — a reader can tell which parts the engine wrote
+        and which parts this deployment did.
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [anomaly_detected, credential_stuffing_detected] }
+        user_id: { type: string, format: uuid }
+        ip: { type: string }
+        metadata:
+          type: object
+          additionalProperties: { type: string }
+        created_at: { type: string, format: date-time }
+        review: { $ref: '#/components/schemas/AnomalyReview' }
+
+    AnomalyList:
+      type: object
+      properties:
+        anomalies:
+          type: array
+          items: { $ref: '#/components/schemas/Anomaly' }
+        limit: { type: integer }
+        offset: { type: integer }
+        status: { type: string, description: The filter that was applied, omitted when the whole queue was returned. }
+        has_more:
+          type: boolean
+          description: >
+            This page came back full, so there MAY be more — a client
+            should ask again rather than assume the queue ends here. It
+            is deliberately not "there IS more": deciding that exactly
+            would mean knowing the total, and a page that comes back
+            short of limit IS the end, because the merged window is an
+            exact prefix of the queue rather than a sample of it.
+
+    AnomalyReviewInput:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [unreviewed, confirmed, dismissed]
+          description: >
+            Required. A review whose decision is missing is not a review.
+            "unreviewed" is how a judgement is withdrawn; there is no
+            DELETE.
+        note: { type: string, maxLength: 500, description: Optional. }
+
+    WebhookDelivery:
+      type: object
+      description: >
+        One attempt-series at one event. A row is written before any HTTP
+        request is made and is never deleted, so this is a record of what
+        this API decided to send, not a sample of what got through.
+      properties:
+        id: { type: integer, description: The delivery's own id, stable across retries. }
+        event_id:
+          type: string
+          description: >
+            The engine's idempotency key for this occurrence — the value
+            sent as X-Cryden-Event-Id, and the one a receiver should
+            deduplicate on. MAY BE EMPTY: the engine generates it with
+            crypto/rand and deliberately delivers without one rather
+            than dropping the event, which is exactly why the primary
+            key is `id` and not this.
+        event_type: { type: string, description: The audit event that fired, e.g. account_locked. }
+        user_id:
+          type: string
+          format: uuid
+          description: Absent for an event with no user attached.
+        ip:
+          type: string
+          description: >
+            Absent when the event carried none. This is the UNREDACTED
+            address from the delivery payload — the shipping redaction
+            that applies to the log sink does not apply here, because
+            this is the record of what was sent to the receiver.
+        payload:
+          type: object
+          description: >
+            The exact body that was (or will be) POSTed, returned as raw
+            JSON in the bytes stored at enqueue. Retries send these same
+            bytes, which is what lets this field answer "show me what we
+            sent" for a retry as well as a first attempt. The signature
+            is computed over exactly this.
+        status: { type: string, enum: [pending, in_flight, delivered, failed] }
+        attempts:
+          type: integer
+          description: >
+            Attempts STARTED. A row at 3 of the configured maximum tells
+            an operator the endpoint has been failing; a row that is
+            `failed` says how many tries it got.
+        response_code:
+          type: integer
+          description: >
+            Absent when no response arrived at all — a connection
+            failure or a timeout, which is a different problem from a
+            receiver answering 500 and one an operator fixes in a
+            different place. Anything outside 2xx is a failure,
+            including a redirect.
+        error:
+          type: string
+          description: The receiver's own words where it gave any; absent otherwise.
+        duration_ms: { type: integer }
+        created_at: { type: string, format: date-time, description: When the row was enqueued, which is when the triggering request happened. }
+        next_attempt_at: { type: string, format: date-time, description: When the worker may next claim this row. }
+        delivered_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: Absent until a 2xx arrives. Never set on a `failed` row.
+
+    ShippedLogEvent:
+      type: object
+      description: >
+        One record as the shipping sink received it — the REDACTED,
+        FILTERED copy, not the full-detail line on stdout. The two differ
+        by design: stdout keeps the IP address that makes an incident
+        debuggable, and only the copy that leaves the process loses it.
+        Reading this response is reading what a hosted aggregator would
+        have been handed.
+      properties:
+        id: { type: integer }
+        level: { type: string, enum: [debug, info, warn, error] }
+        message: { type: string }
+        fields:
+          type: object
+          additionalProperties: { type: string }
+          description: >
+            The record's own key/value fields, already redacted —
+            "[redacted]" under the masking mode, or an HMAC digest under
+            the hashing one. Absent for a record logged with none.
+        sink:
+          type: string
+          description: Which sink wrote it, so a row in a table shared with a second sink stays attributable.
+        shipped_at:
+          type: string
+          format: date-time
+          description: >
+            When the sink wrote the record, which for a synchronous sink
+            is when the engine logged it. Nano-precision, because one
+            login emits many records and at second precision they would
+            tie and nothing downstream could order them.
+
+    DigestRun:
+      type: object
+      description: >
+        One recorded digest. Text is the report exactly as the engine
+        rendered it at the time, stored rather than the counts behind it:
+        a digest covers a window that has ENDED, so re-running its query
+        later would not reproduce it — "the last seven days" is anchored
+        to when the digest was built. Storing what was reported is what
+        makes reading a past digest the same experience as reading a
+        fresh one.
+      properties:
+        id: { type: integer }
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
+        generated_at:
+          type: string
+          format: date-time
+          description: >
+            When the row was written. Distinct from window_end on purpose:
+            a run replayed after an outage covers a window that closed
+            before the digest was made.
+        text:
+          type: string
+          description: >
+            The rendered report, verbatim. Included in a listing rather
+            than behind a fetch-by-id, because there is no fetch-by-id —
+            reading a past digest is the whole point of the history, and
+            a list of windows with no reports in it would be an index to
+            nothing.
+
+    TuningSuggestion:
+      type: object
+      description: >
+        One thing worth reconsidering, split into three parts rather than
+        a sentence. This API returns the structured form
+        (admin.BuildTuningReport) and not cryden's flattened
+        ConfigTuningReport text helper, because a console renders one
+        card per suggestion and a pre-rendered blob cannot be turned
+        back into cards. The three fields are the three things a console
+        needs: which knob, what the evidence says, and what might be
+        worth changing.
+      properties:
+        area:
+          type: string
+          description: >
+            Which knob this concerns — the field a console groups or
+            de-duplicates on. Stable strings, not localized text.
+        finding:
+          type: string
+          description: >
+            What the recent history shows, in terms of the settings
+            currently in force. A sentence meant to be read by a human,
+            not parsed.
+        suggestion:
+          type: string
+          description: >
+            What might be worth changing. Wording is deliberately
+            suggestive ("consider ..."), never imperative: nothing here
+            has been applied, and nothing that reads this response can
+            apply it either.
+
+    LLMProviderInput:
+      type: object
+      description: >
+        The PUT body for the LLM provider. Separate from what is stored
+        rather than the same shape, so the wire contract and the stored
+        record can diverge — and so a field added to the stored config
+        later is not silently accepted from a client that predates it.
+      required: [kind, model, api_key]
+      properties:
+        kind:
+          type: string
+          description: >
+            Which provider implementation to build. One value today:
+            "anthropic".
+        model:
+          type: string
+          description: >
+            The model id to call, e.g. "claude-opus-5". Validated for
+            shape, not against a list: this API does not decide which
+            models a deployment may use, and a list here would go stale
+            between SDK releases.
+        api_key:
+          type: string
+          description: >
+            The provider credential. Required on every write — see PUT
+            on this path for why "blank keeps the existing one" is
+            refused. Sealed before storage and never returned.
+        max_tokens:
+          type: integer
+          minimum: 256
+          maximum: 8192
+          description: >
+            Ceiling on a single model response. Defaults when omitted
+            (0), rather than failing validation.
+
+    RedactedLLMProvider:
+      type: object
+      description: >
+        What GET, PUT and DELETE return. There is no field for the API
+        key in this schema and no mask of one — a console renders
+        "saved" from api_key_set. All fields are false/empty when
+        nothing is configured.
+      properties:
+        kind:
+          type: string
+          description: The stored provider kind, or empty when none is stored.
+        model:
+          type: string
+          description: The stored model id, or empty when none is stored.
+        max_tokens:
+          type: integer
+          description: The stored ceiling, or 0 when none is stored.
+        api_key_set:
+          type: boolean
+          description: Whether a credential is stored. Says nothing about whether it still works.
+        configured:
+          type: boolean
+          description: >
+            Whether anything is stored at all. A console branches on
+            this to decide between an empty form and a saved one.
+
+    DatabaseProviderInput:
+      type: object
+      description: The PUT body for the read-only database.
+      required: [label, dsn]
+      properties:
+        label:
+          type: string
+          description: >
+            What a console shows instead of the connection string, so an
+            operator can tell two configurations apart without reading a
+            password.
+        dsn:
+          type: string
+          description: >
+            The full Postgres connection string, including the
+            credential. Either a postgres:// or postgresql:// URL or a
+            lib/pq keyword/value string carrying a host. Checked for
+            shape here, then used to connect and attempt a write before
+            anything is stored.
+        max_rows:
+          type: integer
+          minimum: 1
+          maximum: 500
+          description: >
+            Ceiling on rows from a single AI-driven query. Defaults when
+            omitted (0). Bounded by cryden's own maximum, so this cannot
+            become a setting that does not do what it appears to.
+
+    RedactedDatabaseProvider:
+      type: object
+      description: >
+        What GET, PUT and DELETE return. The DSN has no field here at
+        all, so a handler cannot serialise it by reaching for the wrong
+        type. Host and database come back because an operator needs them
+        to recognise which connection is stored; the user and password
+        never do.
+      properties:
+        label:
+          type: string
+          description: The operator-supplied name for this connection.
+        max_rows:
+          type: integer
+          description: The stored row ceiling.
+        dsn_set:
+          type: boolean
+          description: Whether a connection string is stored.
+        host:
+          type: string
+          description: >
+            Host and port from the stored connection string, for
+            display. Empty when nothing is stored or the string cannot
+            be parsed — this decorates a response and never fails one.
+        database:
+          type: string
+          description: Database name from the stored connection string, for display.
+        configured:
+          type: boolean
+          description: Whether anything is stored at all.
+
+    AskAIWidgetConfig:
+      type: object
+      description: >
+        The ask-ai widget's configuration, and both the PUT body and the
+        GET response — this is the one setting on this surface that is
+        not a credential, so there is nothing to redact. All fields are
+        false/empty when nothing is configured, which is what makes the
+        unconfigured state read as "the widget is off".
+      properties:
+        enabled:
+          type: boolean
+          description: >
+            Whether the widget is offered to end users at all. A
+            disabled widget is a 404 from whatever serves it, not an
+            empty answer.
+        allowed_origins:
+          type: array
+          maxItems: 20
+          items: { type: string }
+          description: >
+            Origins permitted to embed the widget — scheme, host and
+            optional port, never a path or a pattern. "*" is refused by
+            name: this widget answers questions about the signed-in
+            user's own sessions and audit events, so a wildcard would
+            let any page on the internet ask them through a visitor's
+            browser.
+        entities:
+          type: array
+          maxItems: 8
+          items: { type: string }
+          description: >
+            Which of cryden's allowlisted entities the widget will
+            answer over — the host narrowing the engine's vocabulary.
+            Validated against cryden's own allowlist rather than a copy
+            of it. This is the one field here with teeth: the API
+            enforces the configured subset in front of the provider,
+            since cryden's widget.Ask scopes to the calling user but
+            does so over every entity it allowlists.
+        greeting:
+          type: string
+          maxLength: 200
+          description: The copy the embed shows before a question is asked. Required when enabled.
+        placeholder:
+          type: string
+          maxLength: 200
+          description: The input's placeholder text. Optional.
+
+    AskAIAnswer:
+      type: object
+      description: >
+        One answer from the widget, as POST /ask-ai returns it.
+        Deliberately just the text and a row count: the rows are already
+        in `answer`, rendered, and the count is what lets a client say
+        "3 sessions" without parsing the table back out of prose.
+      properties:
+        answer:
+          type: string
+          description: >
+            The answer as plain text — a rendered table of the result
+            rows, with the column names as a header line. Built
+            deterministically from the rows rather than composed by a
+            second model call, so the same question over the same data
+            yields the same string. No rows is the answer "No matching
+            results." rather than an empty string, because "nothing
+            matched" and "the widget failed to answer" must not look the
+            same to a client.
+        row_count:
+          type: integer
+          description: >
+            How many rows `answer` was rendered from, after the
+            deployment's row cap. Zero is a real answer and not an
+            error.
+
+  responses:
+    BadRequest:
+      description: Malformed request body
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Unauthorized:
+      description: Missing/invalid/expired credentials or token
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Forbidden:
+      description: Authenticated, but not permitted (e.g. account locked, session not owned)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    Conflict:
+      description: Resource already exists (e.g. duplicate email)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+    NotImplementedOnSQLite:
+      description: >
+        not_implemented_on_sqlite — this deployment runs on SQLite, so
+        the whole admin console is unavailable. Returned for every
+        /admin path before the token is examined, which is why it can
+        appear where a 401 or 403 otherwise would. A property of the
+        deployment, not of the caller: the console's tables are
+        Postgres-only and RequireAdmin itself depends on the operators
+        table, so a SQLite deployment has no operators and no partial
+        console to offer. See the 1.8 note in this document's
+        description.
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+paths:
+  /signup:
+    post:
+      summary: Create a new user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      user_id: { type: string }
+                      email: { type: string }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /login:
+    post:
+      summary: Authenticate and receive a token pair
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Tokens' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: Account locked due to repeated failed attempts
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /refresh:
+    post:
+      summary: Rotate a refresh token for a new token pair
+      description: >
+        Presenting an already-rotated (reused) token returns
+        token_reused and revokes the ENTIRE session family — every
+        token descended from that login, not just the one presented.
+        The client must discard all tokens and force a full
+        re-login when this happens.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        '200':
+          description: New token pair issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/Tokens' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /logout:
+    post:
+      summary: Revoke a single session
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [session_id]
+              properties:
+                session_id: { type: string }
+      responses:
+        '200': { description: Session revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: session does not belong to the authenticated user
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /logout-all:
+    post:
+      summary: Revoke every session for the authenticated user
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200': { description: All sessions revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /verify:
+    get:
+      summary: Check whether the presented access token is valid
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Token is valid
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      user_id: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /sessions:
+    get:
+      summary: List active sessions for the authenticated user
+      description: >
+        Returns named sessions (since 1.1): id, ip, user_agent and
+        created_at as before, plus label, device and location. `label`
+        is what a "your devices" screen should show; the structured
+        halves are there so a client can group or sort without
+        re-parsing a display string.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: List of active sessions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Session' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /sessions/{id}:
+    delete:
+      summary: Revoke a specific session
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Session revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /change-password:
+    post:
+      summary: Change password
+      description: >
+        Requires the current password as re-confirmation. On success,
+        ALL sessions are revoked, including the one making this
+        request — the client must discard its tokens and log in
+        again.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string }
+                new_password: { type: string }
+      responses:
+        '200': { description: Password changed, all sessions revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /delete-account:
+    post:
+      summary: Permanently delete the authenticated user's account
+      description: Requires the current password as re-confirmation. Irreversible.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password]
+              properties:
+                current_password: { type: string }
+      responses:
+        '200': { description: Account deleted }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /email/request-change:
+    post:
+      summary: Request an email change
+      description: >
+        Sends a verification link to the NEW address. The email is
+        NOT updated until /email/confirm-change is called with the
+        resulting token.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [new_email]
+              properties:
+                new_email: { type: string, format: email }
+      responses:
+        '200': { description: Verification email sent }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /email/confirm-change:
+    post:
+      summary: Confirm an email change using the token from the verification link
+      description: >
+        Deliberately public — no Bearer auth required. The token
+        itself is the proof of authorization, since the user may be
+        clicking the link from an email client with no active
+        session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+      responses:
+        '200': { description: Email changed }
+        '400':
+          description: Token invalid, already used, or expired
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /health:
+    get:
+      summary: Health check
+      responses:
+        '200': { description: Healthy }
+        '503': { description: Database unreachable }
+
+  /api-keys:
+    post:
+      summary: Mint an API key for the authenticated user
+      description: >
+        Returns the raw key exactly once. Only its SHA-256 hash is
+        stored, so a caller that loses it must mint a new one — which
+        is what the `notice` field in the response says, and why a
+        client must render it. Scoped to the calling user by the engine
+        itself, from the verified token and never from the request.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name: { type: string, description: Label for the key; 100 characters or fewer. }
+                scopes:
+                  type: array
+                  items: { type: string }
+                  description: Host-defined permission strings, stored verbatim. The engine never interprets them.
+                expires_in_days:
+                  type: integer
+                  minimum: 0
+                  maximum: 3650
+                  default: 0
+                  description: >
+                    0 or absent means the key never expires. Bounded so
+                    that the conversion to a duration cannot overflow
+                    into a negative TTL and come back as a confusing
+                    invalid_api_key_ttl.
+      responses:
+        '201':
+          description: The key was created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      key: { type: string, description: The raw key. This is the only time it is ever returned. }
+                      notice: { type: string, description: Human-readable warning that the key cannot be retrieved later. }
+                      api_key: { $ref: '#/components/schemas/APIKey' }
+        '400':
+          description: >
+            bad_request for a malformed body, name over 100 characters,
+            or expires_in_days outside 0-3650; invalid_api_key_scope for
+            a scope that is empty or contains whitespace.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: api_keys_not_configured — the engine has no API key store on this deployment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+    get:
+      summary: List the authenticated user's API keys
+      description: >
+        Live keys only. Revoked keys are absent; expired-but-unrevoked
+        ones ARE included with "expired": true, because "it expired on
+        Tuesday" is the answer to why a pipeline broke. The raw key
+        never appears here or anywhere else.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: The calling user's keys
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/APIKey' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: api_keys_not_configured — the engine has no API key store on this deployment.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api-keys/{keyID}:
+    delete:
+      summary: Revoke an API key
+      description: >
+        Irreversible — the reason a key gets revoked is that somebody
+        else may have it, so mint a new one rather than offering an
+        un-revoke. Ownership is enforced in the store statement, so a
+        key belonging to another account, a key that does not exist and
+        an already-revoked key all answer the same 404.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: keyID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: Revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      status: { type: string, example: api key revoked }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404':
+          description: api_key_not_found, or api_keys_not_configured when the deployment has no API key store.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /ask-ai:
+    post:
+      summary: Ask the widget a question about your own account
+      description: >
+        Authenticated as an ordinary end user, NOT as an operator. This
+        is the one AI-assisted surface on this API that is not behind
+        the admin check, and that difference is the feature: the answer
+        is about the caller's own sessions and audit events, not about
+        anyone else's.
+
+        The identity is the verified token and nothing else. The request
+        body has no field that can name a user; one sent anyway is
+        ignored rather than rejected, because there is nothing for it to
+        reach. The engine's widget surface additionally discards whatever
+        identity filter the model produced and substitutes the one this
+        API verified, and it will not answer over an entity the
+        deployment has not enabled.
+
+        Which entities this answers over is the `entities` setting on
+        /admin/settings/ask-ai-widget, which stays admin only. A
+        question naming anything outside the configured subset is
+        refused before a query runs.
+
+        Read-only: it answers and records nothing, and nothing here can
+        take an action on any account.
+
+        Answers are rendered from the query result rather than composed
+        by a second model call, so `answer` is a deterministic plain-text
+        table over rows already scoped to this one user.
+
+        Two things worth knowing before calling it. It is slow by the
+        standards of the rest of this API — at minimum one call to the
+        configured model provider — and it costs the deployment money
+        per question, which is why `question` is length-bounded and why
+        this path is the one most worth putting a per-user limit in
+        front of. As of this version it is bounded only by whatever edge
+        rate limit the deployment runs.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [question]
+              properties:
+                question:
+                  type: string
+                  maxLength: 500
+                  description: >
+                    The question in whatever words the end user typed.
+                    Empty or whitespace-only is refused. The 500
+                    character bound is on what the deployment will pay
+                    to have parsed, not on what the model could read.
+      responses:
+        '200':
+          description: An answer scoped to the calling user.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AskAIAnswer' }
+        '400':
+          description: >
+            invalid_question — the question was empty, whitespace only,
+            or over 500 characters. question_not_answerable — the
+            question named an entity this deployment does not answer
+            over. Neither message names the entities that ARE available,
+            because this text reaches whoever is typing at the widget.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: >
+            origin_not_allowed — the request carried an Origin header
+            naming an origin the operator has not allowlisted. This is a
+            guard against an embed on a site nobody meant to authorise,
+            NOT the security boundary; the Bearer token is. A request
+            with no Origin at all is allowed, deliberately: refusing it
+            would break every non-browser client while stopping nobody,
+            since a caller able to forge an allowlisted origin can also
+            simply omit it.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '404':
+          description: >
+            ask_ai_widget_disabled — an operator has switched the widget
+            off. This is also the answer when nothing has been
+            configured, because the stored configuration's zero value is
+            disabled and an unconfigured widget is not a different thing
+            to a caller than a deliberately off one. not_configured —
+            the widget is on but the deployment has no LLM provider or
+            no read-only database stored. On a SQLite deployment this
+            path always answers not_configured, since there is no
+            settings table to store a provider in — see the 1.8 note in
+            this document's description. The whole provider
+            configuration is absent, so the answer is the same one a
+            Postgres deployment gives with no provider stored, and no
+            client needs to know which backend it is talking to.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/security/hash-migration:
+    get:
+      summary: Progress of a password-hash migration
+      description: >
+        Admin only — an operator's token. Reports the engine's own
+        password_hash_upgraded audit events against the user total,
+        which is the only way to watch a bcrypt-to-Argon2id migration
+        drain: switching PASSWORD_HASHER rewrites one stored hash per
+        successful login, and there is no separate command to run.
+        Read-only by construction — it calls two count methods and
+        records nothing.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: window_days
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 365, default: 7 }
+          description: >
+            The reporting window. Out of range or non-numeric is a 400,
+            not a silent clamp — a caller asking for 5000 and getting
+            365 back has no way to tell that from a window that happens
+            to hold the same count.
+      responses:
+        '200':
+          description: The report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/HashMigration' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_configured — the router was built without the stores this report reads.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/security/mfa-adoption:
+    get:
+      summary: Second-factor enrolment as the engine's own audit events
+      description: >
+        Admin only — an operator's token. For each factor (totp,
+        passkey): how many enrolment and removal events the engine has
+        recorded, all-time and over a window, alongside the user total.
+        Read-only by construction — it calls count methods and records
+        nothing.
+
+        It counts events, not users, and every field is named
+        accordingly. See the MFAAdoption schema for why no adoption
+        percentage is derived: the engine cannot be asked how many
+        accounts currently have a factor enrolled, so a ratio would be a
+        number that looks like coverage and is not. The pair that is
+        worth reading is enrolments against removals — a factor whose
+        removals keep pace is churning — and the windowed pair is what
+        says whether that is happening now.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: window_days
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 365, default: 7 }
+          description: >
+            The reporting window. Out of range or non-numeric is a 400,
+            not a silent clamp.
+      responses:
+        '200':
+          description: The report
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/MFAAdoption' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_configured — the router was built without the stores this report reads.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/oauth/health:
+    get:
+      summary: Reachability of each OAuth provider this API knows about
+      description: >
+        Admin only — an operator's token. Per provider: whether it is
+        configured at all, and whether its authorize endpoint answers.
+        A probe is a bare GET with no OAuth parameters, so it can neither
+        start nor complete a login; providers left unconfigured are
+        reported without being probed. This is api-side logic, not an
+        engine feature: cryden knows whether a provider is configured,
+        not whether it is reachable.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: One row per provider, in a stable order
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      providers:
+                        type: array
+                        items: { $ref: '#/components/schemas/OAuthProviderHealth' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/users:
+    get:
+      summary: Find an account by exact email, or browse accounts
+      description: >
+        Admin only — an operator's token. Two modes, chosen by whether
+        `q` is present: an exact-email lookup, or a page of every
+        account newest first. The response's `match` says which one
+        produced the page.
+
+        There is no partial or case-insensitive search, and that is a
+        decision rather than a gap. Partial search would mean SQL
+        against the engine's own users table, which is the boundary this
+        API keeps everywhere else: the engine owns that table, and a
+        query written against it here would be a second, silent
+        definition of what a user is. If partial search is wanted later
+        it is its own deliberate piece of work.
+
+        Read-only: there is no lock, unlock, password reset or delete on
+        this surface. An operator who needs one has the engine's own
+        admin path, not an HTTP endpoint this API invented.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: q
+          in: query
+          required: false
+          schema: { type: string }
+          description: >
+            An email to match exactly, byte for byte and case-sensitive,
+            because that is how the engine stores and compares
+            addresses. Absent or empty means browse. A search that finds
+            nothing is an empty 200, never a 404 — answering 404 would
+            make a console render "error" for the most ordinary outcome
+            a search has.
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, maximum: 10000, default: 0 }
+      responses:
+        '200':
+          description: >
+            The page. In exact-email mode limit and offset are echoed
+            rather than obeyed — an exact match is one account or none,
+            so there is nothing to page — and they are not rejected
+            either, since a console that keeps its page size fixed while
+            switching modes is doing nothing wrong.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AdminUserList' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_configured — the router was built without the user store.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/users/{userID}:
+    get:
+      summary: One account's state, session count and recent history
+      description: >
+        Admin only — an operator's token. Reports the account, a count of
+        its live sessions and its most recent audit events.
+
+        Read-only, like everything else on this surface that is not an
+        explicit operator write: it reports a lockout and cannot clear
+        one. `locked` is computed from the deadline rather than mirrored
+        from the stored column, because the engine clears a lockout by
+        time passing rather than by writing a null — see the AdminUser
+        schema. Sessions are counted rather than listed, deliberately;
+        the SupportHandlers report makes the same choice for the same
+        reason.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: userID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The account
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AdminUserDetail' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: >
+            not_found for an unknown or malformed userID — a path segment
+            that cannot be a user id is answered the same as one that
+            simply is not a user, since a malformed id handed to Postgres
+            is a driver error that would surface as a 500; or
+            not_configured when the stores are absent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/users/{userID}/metadata:
+    get:
+      summary: Every metadata key set on one user
+      description: >
+        Admin only. Per-user metadata is this API's own table, not an
+        engine feature — cryden's user record deliberately has no
+        metadata concept, on the grounds that extra per-user data is a
+        host decision. Its purpose here is JWT claim mapping: the keys
+        returned are merged into every access token issued for this user
+        from now on, alongside their operator role if they have one.
+        Read-only.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: userID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The user's keys and the names that may not be used
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/UserMetadata' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: >
+            not_found — no such user, or a userID that is not a UUID at
+            all. Both answer the same way on purpose: a malformed id
+            handed to Postgres is a driver error that would surface as a
+            500, and "no such user" is the honest description of both.
+            Also not_configured when the router was built without the
+            stores this reads.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/users/{userID}/metadata/{key}:
+    put:
+      summary: Set one metadata key on a user
+      description: >
+        Admin only. Sets a single key, creating it or replacing it — not
+        a whole-map replace, so two operators editing different fields of
+        the same user cannot overwrite each other's work. The user's next
+        issued token carries the new claim; tokens already issued do not
+        change, since nothing re-signs them.
+
+        A key is refused with 400 reserved_metadata_key if it names a
+        registered JWT claim (sub, iss, exp, ...) or this API's own
+        "role", and with 400 invalid_metadata_key if it does not match
+        ^[A-Za-z_][A-Za-z0-9_.-]{0,63}$. Both are checked when the key is
+        saved rather than when a token is next issued, so a bad key fails
+        once, for the operator who typed it, instead of at every login
+        for the affected user. `reserved_claim_names` on GET lists the
+        first set.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: userID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
+          description: >
+            The claim name to set. Percent-encoded by the client as any
+            path segment is; a key containing a slash is decoded before
+            the rule above judges it, so it is rejected by the rule
+            rather than by URL parsing.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [value]
+              properties:
+                value:
+                  description: >
+                    Any JSON value. The field must be present: an
+                    explicit null is a legitimate value to store, while
+                    an absent field is a client bug, and decoding into a
+                    generic value would collapse the two.
+      responses:
+        '200':
+          description: >
+            The user's whole set after the write, in the same shape GET
+            returns — so a save is also the refresh, and a client needs
+            one parser. Read back from storage rather than echoed, which
+            is what proves the value that landed is the value stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/UserMetadata' }
+        '400':
+          description: >
+            invalid_metadata_key, reserved_metadata_key, or a body with no
+            value field.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_found, or not_configured. See GET on this path.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    delete:
+      summary: Remove one metadata key from a user
+      description: >
+        Admin only. Removes a single key. The user's next issued token no
+        longer carries the claim; tokens already issued keep it until
+        they expire, and nothing revokes them — the same property a role
+        revoke has.
+
+        A key that is not set is a 404 rather than a bare 200, matching
+        DELETE /api-keys/{keyID} and DELETE /sessions/{id}: a console
+        that removed the wrong field should be told, not shown a success
+        it did not achieve.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: userID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The user's whole set after the removal.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/UserMetadata' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: >
+            metadata_key_not_found when the user has no such key;
+            not_found for an unknown or malformed userID; not_configured
+            when the stores are absent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/anomalies:
+    get:
+      summary: The flagged-event review queue
+      description: >
+        Admin only — an operator's token. The two event types the engine
+        writes when a login looks wrong rather than merely failing
+        (anomaly_detected and credential_stuffing_detected), merged
+        newest first, each with the review recorded against it.
+
+        The queue is deliberately just those two. Widening it to the
+        failure events around them (login_failed, token_reuse_detected)
+        would not make a bigger queue, it would make the audit table the
+        queue — and a review surface that asks about everything asks
+        about nothing. Both of these carry a "signals" key naming what
+        tripped, which is what makes them reviewable: an operator can
+        read the event and form a judgement.
+
+        Read-only: it reads events and reviews and writes nothing.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [unreviewed, confirmed, dismissed] }
+          description: >
+            Narrows the page to one decision. An event with no review row
+            matches "unreviewed" — which is the tab an operator opens
+            first, so the two are treated as the same thing everywhere.
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, minimum: 0, maximum: 10000, default: 0 }
+          description: >
+            Bounded by limit + offset <= 500, refused rather than clamped
+            beyond that. The engine's per-type search takes a limit and
+            no offset, so the merged window is fetched to limit+offset
+            from each type; clamping would silently return a page from
+            further up the queue than the caller asked for, which on a
+            review queue means showing events they have already dealt
+            with.
+      responses:
+        '200':
+          description: The page
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AnomalyList' }
+        '400':
+          description: >
+            A status that is not one of the three, or a limit + offset
+            beyond what the merge can fetch.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_configured — the router was built without the audit or review store.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/anomalies/{eventID}:
+    put:
+      summary: Record what an operator decided about a flagged event
+      description: >
+        Admin only — an operator's token. Records a judgement against one
+        audit event, keyed on the event's own id, which is what a console
+        has in hand and what the engine's record is filed under.
+
+        This write takes no action on any account, and that is the point
+        rather than an omission. Confirming an event records that a
+        person judged it real: no account is locked, no session is
+        revoked, no threshold is tuned. There is no machinery in this API
+        that acts on an account beyond what an operator does by hand, and
+        putting one behind a "confirm" button is exactly the automatic
+        action the read-only rule forbids. This endpoint is a console
+        action or it does not happen.
+
+        The judgement is stored in this API's own table, never written
+        into the engine's audit history — the event reads exactly the
+        same before and after. There is no DELETE: "actually, never mind"
+        is status=unreviewed, which keeps the row and its attribution,
+        because the record that somebody looked and thought better of it
+        is worth more than the tidier table a delete would leave.
+
+        The response is the review alone, not the whole queue row.
+        Re-reading the event would need a lookup by event id and the
+        engine has none — events are fetched by type — so a save returns
+        the decision rather than pretending to return the row it belongs
+        to, and a client refreshes the list it already has.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: eventID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AnomalyReviewInput' }
+      responses:
+        '200':
+          description: The recorded review
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AnomalyReview' }
+        '400':
+          description: >
+            invalid_review_status for a status that is not one of the
+            three, invalid_review_note for a note over 500 characters, or
+            a body with no status field.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: >
+            audit_event_not_found — there is no audit event with that id,
+            so there is nothing to review. Also answered for a path
+            segment that cannot be an event id at all, since a malformed
+            uuid handed to Postgres is a driver error that would surface
+            as a 500; and not_configured when the review store is absent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/webhooks/deliveries:
+    get:
+      summary: The webhook delivery log, newest first
+      description: >
+        Admin only. Lists what this API enqueued for delivery and what
+        happened to each row. Deliveries are enqueued, never sent
+        inline: the engine calls the webhook sender synchronously on the
+        login request path, so this API writes a row and returns, and a
+        background worker makes the call. Failures are retried with
+        exponential backoff up to a configured maximum, then recorded as
+        `failed` and left readable — nothing is ever deleted.
+
+        Read-only by construction. There is deliberately no "retry this
+        delivery" endpoint: re-queuing a delivery has consequences for a
+        third party, and this surface reports rather than acts.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema: { type: string, enum: [pending, in_flight, delivered, failed] }
+          description: >
+            Restrict to one status. An unrecognized value is a 400
+            naming the four valid ones, not an empty list — which is
+            indistinguishable from "no deliveries", the one thing a
+            filter must never be confusable with. Absent means every
+            status.
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+          description: >
+            Out of range or non-numeric is a 400, not a silent clamp — a
+            caller asking for 100000 and getting 500 back cannot tell
+            that from a log holding 500 rows.
+      responses:
+        '200':
+          description: The matching rows, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      deliveries:
+                        type: array
+                        items: { $ref: '#/components/schemas/WebhookDelivery' }
+                      count: { type: integer }
+                      status:
+                        type: string
+                        description: The filter in force, absent when none was asked for.
+                      statuses:
+                        type: array
+                        items: { type: string }
+                        description: The four valid values, so a client need not hardcode them.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: >
+            not_configured — the router was built without a delivery log,
+            which is what an unset WEBHOOK_URL produces. A wiring fact,
+            not a server fault.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/logging/recent:
+    get:
+      summary: The shipped-events log, newest first
+      description: >
+        Admin only. Lists records as the cloud-logging sink received
+        them: redacted and level-filtered. This deployment ships no
+        vendor SDK, so "shipped" means recorded in this API's own table,
+        which is the same bytes a hosted aggregator would have been
+        handed — swapping in a real client later changes one line of
+        main.go and nothing here.
+
+        Read-only by construction, like the other admin endpoints. There
+        is deliberately no endpoint that writes a record, edits the level
+        threshold, or clears the log: changing what gets shipped is
+        configuration, and configuration changes go through the same
+        explicit, human-confirmed settings path every other one does.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: level
+          in: query
+          required: false
+          schema: { type: string, enum: [debug, info, warn, error] }
+          description: >
+            The minimum severity, and it means AT OR ABOVE — level=warn
+            returns warn and error, the same direction the shipping
+            filter reads the word. One word, one meaning, within one
+            feature. An unrecognized value is a 400 naming the four valid
+            ones rather than an empty list. Absent means everything.
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 500, default: 50 }
+      responses:
+        '200':
+          description: The matching records, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      events:
+                        type: array
+                        items: { $ref: '#/components/schemas/ShippedLogEvent' }
+                      count: { type: integer }
+                      level:
+                        type: string
+                        description: >
+                          The filter in force, in the caller's own word,
+                          absent when none was asked for. Present so a
+                          short list can be told apart from a quiet
+                          engine.
+                      levels:
+                        type: array
+                        items: { type: string }
+                        description: The four valid values, least severe first.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: >
+            not_configured — the router was built without a shipped-events
+            sink, which is what an unset CLOUD_LOGGING produces.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/config-tuning:
+    get:
+      summary: Settings worth reconsidering, judged against recent history
+      description: >
+        Admin only. Summarises the recent audit history against the
+        settings THIS deployment is actually running and returns the
+        suggestions as a structured list — one object per knob, ready to
+        render as a card. Calls admin.BuildTuningReport directly rather
+        than the flattened cryden.ConfigTuningReport text helper: the
+        text is right for a CLI and wrong for a console, which cannot
+        turn a pre-rendered blob into one card per suggestion.
+
+        THERE IS NO WRITE PATH, and there is not going to be one. No
+        parameter here changes a setting and no counterpart endpoint
+        applies a suggestion. The recorded decision is pre-fill, never
+        auto-apply: a suggestion pre-fills the settings field it
+        concerns and a human still saves that change through the
+        ordinary settings path. The route accepts GET and nothing else,
+        and the report is built through an interface with no Record on
+        it, so producing one cannot even write an audit event.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: window_days
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 365, default: 30 }
+          description: >
+            How far back to judge. Default 30 — cryden's own tuning
+            window, deliberately wider than the digest's week, because a
+            config knob should be judged against a month of traffic
+            rather than whatever happened this week.
+      responses:
+        '200':
+          description: The suggestions and the counts they were computed from
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      since: { type: string, format: date-time }
+                      until: { type: string, format: date-time }
+                      window_days: { type: integer }
+                      counts:
+                        type: object
+                        additionalProperties: { type: integer }
+                        description: >
+                          The raw audit counts the suggestions were
+                          computed from, so a console can show the
+                          evidence rather than asking an operator to
+                          trust a sentence. Includes event types cryden
+                          does not define, if this deployment records
+                          any.
+                      suggestions:
+                        type: array
+                        items: { $ref: '#/components/schemas/TuningSuggestion' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: >
+            not_configured — the router was built without the audit
+            store, so there is no history to judge anything against.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/support/diagnose:
+    get:
+      summary: Why one account cannot log in
+      description: >
+        Admin only. Answers the support ticket "why can't this person
+        log in" from the account's own recorded history: whether it is
+        locked and until when, its consecutive failed-attempt count, how
+        many sessions it holds right now, and the recent failure-type
+        events behind all of that, newest first.
+
+        Read-only structurally, not by convention: the report is built
+        through interfaces carrying no LockAccount, ResetFailedAttempts
+        or Revoke, so this cannot unlock the very account it is
+        describing.
+
+        An address with no account is NOT an error — it is the answer,
+        and the text says so. A 404 would be indistinguishable from a
+        broken endpoint, and "you have the wrong address" is exactly what
+        an agent pasting a typo needs to be told.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: email
+          in: query
+          required: true
+          schema: { type: string, format: email }
+          description: >
+            The account to diagnose. Required: absent or blank is a 400
+            rather than a diagnosis of the empty string, which would come
+            back as "no account exists" — an answer to a question nobody
+            asked.
+      responses:
+        '200':
+          description: The diagnosis, as plain text
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      email:
+                        type: string
+                        description: >
+                          Echoed back, so an agent working through a queue
+                          can see which address was answered.
+                      text:
+                        type: string
+                        description: >
+                          The engine's rendered report, byte for byte.
+                          Multi-line plain text, meant to be read as it
+                          is.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/digest:
+    get:
+      summary: Build a security digest for a window ending now
+      description: >
+        Admin only. Returns cryden's DigestSince report for the window
+        ending at this request, verbatim — the text is the engine's and
+        this API does not reformat a report it does not own. since and
+        until are reported alongside it because a client should not have
+        to parse English out of a digest to learn what it covers, and
+        because until is this API's clock reading rather than something
+        the engine returns.
+
+        Read-only in the strongest sense available: the report is built
+        through an interface with no way to write anything, and this
+        handler records nothing either. Asking twice leaves no trace, so
+        a digest in the history below is only ever something the
+        schedule produced.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: window_days
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 365, default: 7 }
+          description: >
+            How far back to count. Default 7, which is what makes this a
+            weekly digest. Bounded and rejected rather than clamped, so a
+            caller that asked for 5000 days is told so instead of being
+            handed 365 and reading it as a week that happens to hold the
+            same history.
+      responses:
+        '200':
+          description: The report and the window it covers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      since: { type: string, format: date-time }
+                      until:
+                        type: string
+                        format: date-time
+                        description: The instant the report was built. Always now — a digest is a report on the run-up to the present.
+                      window_days: { type: integer }
+                      text:
+                        type: string
+                        description: >
+                          The engine's rendered report, byte for byte.
+                          Multi-line plain text, meant to be read as it is.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/digest/history:
+    get:
+      summary: The digests the schedule has recorded, newest first
+      description: >
+        Admin only. Lists rows from this API's own digest_runs table,
+        which only the scheduler writes — nothing on the HTTP surface can
+        create, re-run or delete one, so an operator cannot manufacture
+        history through the API.
+
+        cryden has no scheduling concept: WeeklyDigest/DigestSince build a
+        report on demand and return a string, with no run record. The
+        table, the job that fills it and this endpoint are all this API's
+        own. DIGEST_INTERVAL_HOURS turns the schedule on; it is opt-in,
+        and the first run happens one full interval after startup rather
+        than at boot, so a process that restarts often does not write one
+        row per restart.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 200, default: 20 }
+      responses:
+        '200':
+          description: The recorded runs, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      runs:
+                        type: array
+                        items: { $ref: '#/components/schemas/DigestRun' }
+                      count: { type: integer }
+                      limit:
+                        type: integer
+                        description: The limit in force, so a console showing "20 of 143" need not keep its own copy of the default.
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: >
+            not_configured — no digest_runs store is wired, which is what
+            an unset DIGEST_INTERVAL_HOURS produces. Answered rather than
+            returned as an empty list, which an operator would read as
+            "no digest has ever been built".
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/settings/llm-provider:
+    get:
+      summary: The configured LLM provider, without its credential
+      description: >
+        Admin only. Returns which model and token ceiling back the
+        AI-assisted admin features, and whether a credential is stored —
+        never the credential itself, in any form. It is not masked and
+        not truncated to its last few characters: a console does not need
+        it (it renders "saved" from `api_key_set`), and returning any
+        part of it would put the secret in a browser's memory and a
+        devtools panel, which is what encrypting it at rest was for.
+
+        Nothing configured yet is a 200 with `configured: false`, not a
+        404: an empty settings form is an answer a console renders, while
+        a 404 would make it render a broken panel. Compare GET
+        /admin/digest/history, where the 404 is right because there the
+        absence means the feature is off rather than unconfigured.
+
+        Answers 404 not_configured when SETTINGS_ENCRYPTION_KEY is unset,
+        which is this deployment saying it has nowhere safe to put a
+        credential.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: >
+            The stored provider with the credential replaced by
+            `api_key_set`, or an all-false body when none is stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/RedactedLLMProvider' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_configured. See this path's description.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: >
+            setting_undecryptable — a credential is stored but this
+            deployment's key cannot open it, which almost always means
+            SETTINGS_ENCRYPTION_KEY changed. Deliberately not reported
+            as 404: the setting is there, and telling an operator it is
+            missing would send them to re-enter a credential that is
+            fine. DELETE clears the row without needing the key.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    put:
+      summary: Store an LLM provider
+      description: >
+        Admin only. The credential is required on every write rather than
+        being optional with "blank means keep the existing one". That
+        convention is the usual one and it is the wrong one here: an
+        omitted field and a deliberately cleared one would be the same
+        request, and the failure mode of getting it wrong is a form that
+        looks as though it saved a key while silently storing an empty
+        one.
+
+        The stored value is sealed with AES-256-GCM before it reaches the
+        table, keyed from SETTINGS_ENCRYPTION_KEY — a separate secret
+        from cryden's ENCRYPTION_KEY on purpose, since the two have
+        different lifetimes and blast radii. This credential is treated
+        with the same care as JWT_SECRET: it is never logged, never
+        returned, and never written in the clear.
+
+        `max_tokens` defaults when omitted (0) rather than failing
+        validation, since a console that does not ask is the common case.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LLMProviderInput' }
+      responses:
+        '200':
+          description: >
+            The stored provider, redacted. Echoed as stored rather than
+            as submitted, minus the credential.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/RedactedLLMProvider' }
+        '400':
+          description: >
+            invalid_llm_provider — an unknown kind, a missing or
+            malformed credential, or max_tokens outside the accepted
+            range. The message names the offending field and bound: the
+            caller is already an operator and none of it is secret.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_configured. See GET on this path.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    delete:
+      summary: Clear the stored LLM provider
+      description: >
+        Admin only. Switches the AI-assisted query features off until a
+        provider is configured again.
+
+        Needs no encryption key, which is what makes it the way out for a
+        deployment that has lost SETTINGS_ENCRYPTION_KEY and can no
+        longer read what it stored: clearing is always possible, even
+        when reading is not.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Always the all-false redacted body.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/RedactedLLMProvider' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_configured. See GET on this path.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/settings/database-provider:
+    get:
+      summary: The configured read-only database, without its credential
+      description: >
+        Admin only. Returns the label, the row ceiling and the two
+        harmless halves of the connection string — host and database —
+        so an operator can tell which connection is stored without being
+        shown a password. The user, the password and the full DSN are not
+        returned in any form and have no field in the response schema.
+
+        Nothing configured yet is a 200 with `configured: false`; 404
+        not_configured when SETTINGS_ENCRYPTION_KEY is unset. Same
+        reasoning as GET /admin/settings/llm-provider.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: The stored connection, described rather than returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/RedactedDatabaseProvider' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_configured. See this path's description.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: setting_undecryptable. See GET /admin/settings/llm-provider.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    put:
+      summary: Store a read-only database connection, after verifying it
+      description: >
+        Admin only. This endpoint is where cryden's "the credential
+        boundary, not just the allowlist, is the real safety guarantee"
+        requirement is enforced, and it enforces it in three steps whose
+        order is the whole design:
+
+        1. Validate the shape, which is cheap and local.
+        2. Connect with the supplied credentials and ATTEMPT A WRITE —
+           create a temporary table, in the session's own pg_temp schema
+           so nothing is left behind. Nothing is stored unless the
+           database itself refuses.
+        3. Only then store it, sealed.
+
+        The check is an attempted write rather than a reading of the
+        role's attributes, and it cannot be done in the console: a
+        "read-only?" checkbox is a claim about a database made by whoever
+        ticked it, and a browser cannot open a Postgres connection at
+        all. Only the server's refusal is evidence, and it is evidence
+        about the actual role, on the actual database, through the actual
+        credentials.
+
+        The cost is that this endpoint is slower than its neighbours: it
+        opens a connection and runs statements before answering, bounded
+        by a ten-second timeout. That is paid once per save, not per
+        query. A connection that cannot be made, times out, or fails for
+        any reason other than an insufficient-privilege refusal is
+        refused as unverified — not accepted. Treating "could not find
+        out" as a pass would make the check succeed exactly when it is
+        least able to tell.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DatabaseProviderInput' }
+      responses:
+        '200':
+          description: The stored connection, redacted.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/RedactedDatabaseProvider' }
+        '400':
+          description: >
+            invalid_database_provider for a malformed DSN, a missing
+            label or max_rows out of range; database_role_not_read_only
+            when the role could write; database_role_unverified when the
+            check could not reach a conclusion. The last two are
+            different answers on purpose — the first is a grant to
+            change, the second is usually a connection string to fix.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_configured. See GET on this path.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    delete:
+      summary: Clear the stored database connection
+      description: >
+        Admin only. Needs no encryption key, for the same reason
+        DELETE /admin/settings/llm-provider does not.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Always the unconfigured redacted body.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/RedactedDatabaseProvider' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_configured. See GET on this path.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/settings/ask-ai-widget:
+    get:
+      summary: The ask-ai widget's embed and scope configuration
+      description: >
+        Admin only. Returns the widget's enabled flag, the origins
+        allowed to embed it, the entities it will answer over, and its
+        copy.
+
+        Unlike the other two settings paths there is no redaction here,
+        because there is nothing to redact: none of these fields is a
+        credential, and all of them are what the console shows an
+        operator anyway.
+
+        There is deliberately no embed snippet in the response. The
+        snippet is markup the csax+ console renders into its own pages —
+        the console's markup, the console's styling, the console's
+        script tag — and this API has no opinion on any of those. What
+        this endpoint owes the console is the configuration a snippet is
+        built from, which is what it returns.
+
+        This API served no endpoint for a snippet to point at when that
+        was first written, and since 1.7 it does: /ask-ai serves the
+        widget. The reason for omitting a snippet is therefore no longer
+        that the URL in one would 404 — it is the ownership of the
+        markup. The path is documented here as its own path, which is
+        how a client learns every other path on this API, rather than
+        returned as a string from a settings GET.
+
+        Nothing configured yet is a 200 with `enabled: false`, the zero
+        value: a console then shows the feature as off rather than
+        showing a form that looks as though someone filled it in.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: The stored widget configuration.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AskAIWidgetConfig' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_configured. See this path's description.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: setting_undecryptable. See GET /admin/settings/llm-provider.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    put:
+      summary: Store the ask-ai widget's embed and scope configuration
+      description: >
+        Admin only. This is the endpoint the config tuning advisor's
+        suggestions pre-fill, in the sense recorded for version 1.4: a
+        suggestion ends up as a value in this form and a human presses
+        save. Nothing calls it automatically, and no AI-assisted handler
+        in this API holds a reference to it.
+
+        `entities` is the one field with teeth rather than decoration.
+        cryden's widget.Ask force-scopes every parsed intent to the
+        calling end user's own rows — it discards whatever identity
+        filter the model produced and substitutes the real one — but it
+        scopes over the whole of cryden's allowlist. Narrowing that
+        further is a host decision, so this API enforces the configured
+        subset in front of the provider. The list is validated against
+        cryden's own allowlist rather than a copy of it, so this API
+        cannot refuse an entity the engine permits.
+
+        A disabled widget may be otherwise empty: an operator switching
+        the feature off should not have to fill in fields that are about
+        to stop mattering. Anything that IS filled in is still validated,
+        so a form cannot store a value that was never checked and would
+        be rejected the moment it was switched on.
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AskAIWidgetConfig' }
+      responses:
+        '200':
+          description: The configuration as stored.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AskAIWidgetConfig' }
+        '400':
+          description: >
+            invalid_ask_ai_widget — an entity cryden does not allowlist,
+            a duplicated entity, a malformed or wildcard origin, or the
+            required fields missing while the widget is enabled. A
+            wildcard origin is refused by name with the reason, since
+            this widget answers questions about the signed-in user and
+            "*" would let any page on the internet ask them.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_configured. See GET on this path.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+    delete:
+      summary: Clear the ask-ai widget configuration
+      description: >
+        Admin only. Leaves the widget disabled — the zero value — until
+        it is configured again. Needs no encryption key, like the other
+        two DELETEs on this surface.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: Always the disabled, empty configuration.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AskAIWidgetConfig' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_configured. See GET on this path.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
