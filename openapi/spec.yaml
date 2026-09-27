@@ -2,24 +2,24 @@ openapi: 3.0.3
 info:
   title: CrydenSync API
   version: "1.8"
-description: >
-  Self-hosted HTTP API for the CrydenSync authentication engine.
+  description: >
+    Self-hosted HTTP API for the CrydenSync authentication engine.
 
-  Responses use one of two envelope shapes:
-  {"data": ...} for success or
-  {"error": {"code": ..., "message": ...}} for failure.
+    Responses use one of two envelope shapes:
+    {"data": ...} for success or
+    {"error": {"code": ..., "message": ...}} for failure.
 
-  Use the stable error `code` for programmatic handling; do not parse
-  the human-readable `message`.
+    Use the stable error `code` for programmatic handling; do not parse
+    the human-readable `message`.
 
-  The API supports authentication, sessions, API keys, user metadata,
-  security and audit administration, webhooks, AI-assisted support,
-  configuration management, and security reporting.
+    The API supports authentication, sessions, API keys, user metadata,
+    security and audit administration, webhooks, AI-assisted support,
+    configuration management, and security reporting.
 
-  SQLite supports the core authentication API. Admin endpoints require
-  PostgreSQL and return 501 not_implemented_on_sqlite on SQLite.
-  POST /ask-ai requires a configured AI provider and is unavailable
-  on SQLite.
+    SQLite supports the core authentication API. Admin endpoints require
+    PostgreSQL and return 501 not_implemented_on_sqlite on SQLite.
+    POST /ask-ai requires a configured AI provider and is unavailable
+    on SQLite.
 servers:
   - url: http://localhost:8080/v1
     description: Local dev

@@ -3,138 +3,23 @@ info:
   title: CrydenSync API
   version: "1.8"
   description: >
-    A self-hosted HTTP wrapper around the CrydenSync auth engine.
-    Every response follows one of two envelope shapes: {"data": ...}
-    on success, or {"error": {"code": ..., "message": ...}} on
-    failure. `code` is the stable string to branch on programmatically
-    — never parse `message`.
+    Self-hosted HTTP API for the CrydenSync authentication engine.
 
-    1.1 is the named-sessions change: GET /sessions gained `label`,
-     `device` and `location` on each entry (Tier 2). The four fields it
-     already returned keep their names and types, so a client reading
-     only those is unaffected; a client that validates the object
-     against an exhaustive schema is not.
+    Responses use one of two envelope shapes:
+    {"data": ...} for success or
+    {"error": {"code": ..., "message": ...}} for failure.
 
-    1.2 is additive: API key management (POST/GET /api-keys and
-    DELETE /api-keys/{keyID}) plus GET /admin/security/hash-migration.
-    No existing path, field or status code changed.
+    Use the stable error `code` for programmatic handling; do not parse
+    the human-readable `message`.
 
-    1.3 is additive: per-user metadata for JWT claim mapping
-    (GET/PUT/DELETE /admin/users/{userID}/metadata), the webhook
-    delivery log (GET /admin/webhooks/deliveries) and the
-    shipped-events log (GET /admin/logging/recent). Every one is admin
-    only. No existing path, field or status code changed — but note
-    that PUT and DELETE /admin/users/{userID}/metadata/{key} are this
-    API's first endpoints that change what a subsequent token for
-    another user will contain. See that path's description.
+    The API supports authentication, sessions, API keys, user metadata,
+    security and audit administration, webhooks, AI-assisted support,
+    configuration management, and security reporting.
 
-    1.4 is additive: the weekly security digest and the history of the
-    ones the schedule built (GET /admin/digest, GET
-    /admin/digest/history), the support-ticket assistant (GET
-    /admin/support/diagnose) and the config tuning advisor (GET
-    /admin/config-tuning). All four admin only. None changes any
-    existing path, field or status code, and none can take an action —
-    the digest endpoint records nothing at all, the diagnosis cannot
-    unlock the account it describes, the tuning advisor answers GET and
-    nothing else and its suggestions pre-fill a settings field for a
-    human to save rather than being applied, and only a background job
-    this API runs writes the digest history.
-
-    1.5 is additive: the AI provider settings (GET/PUT/DELETE
-    /admin/settings/llm-provider, /admin/settings/database-provider and
-    /admin/settings/ask-ai-widget). No existing path, field or status
-    code changed, and 1.5 adds no new kind of thing — 1.3's metadata
-    PUT/DELETE already wrote, so the admin surface was not read-only
-    before this version and this version does not change that. The
-    writes here are the "human saves it" half of the pre-fill rule 1.4
-    describes — a tuning suggestion pre-fills one of these forms and an
-    operator saves it — and they are the only place a credential is
-    stored. PUT database-provider additionally verifies against the
-    database itself that the supplied role cannot write, and refuses to
-    store the connection until the server has rejected one; see that
-    path's description for why the check is done there and not in the
-    console.
-
-    1.5 is also the first version whose responses depend on a
-    deployment setting that is not a cryden one: all three paths answer
-    404 not_configured unless SETTINGS_ENCRYPTION_KEY is set, since
-    without that key there is nowhere safe to put a credential.
-
-    1.6 is additive: the admin user surface (GET /admin/users, GET
-    /admin/users/{userID}), the second-factor adoption report (GET
-    /admin/security/mfa-adoption) and the flagged-event review queue
-    (GET /admin/anomalies, PUT /admin/anomalies/{eventID}). No existing
-    path, field or status code changed.
-
-    Two of those are worth reading before the paths. GET /admin/users
-    searches by exact email only, case-sensitively, and says so in its
-    response: the engine stores addresses exactly as typed and compares
-    them with SQL's `=`, so partial or case-insensitive search is not a
-    gap left for later but a query this API declines to write against
-    the engine's own table. GET /admin/security/mfa-adoption reports
-    enrolment and removal EVENTS rather than users and derives no
-    adoption percentage, for the same reason: the engine has no count of
-    accounts with a factor enrolled, so a ratio built from events would
-    be a number that looks like coverage and is not.
-
-    PUT /admin/anomalies/{eventID} is a write, and is the third kind of
-    write on this API's admin surface, after 1.3's metadata and 1.5's
-    settings. It records an operator's judgement about an event the
-    engine flagged and takes no action on any account — there is no
-    machinery in this API that can, which is what keeps it on the right
-    side of the read-only rule. Nothing deletes a review: dismissing is
-    a status, and withdrawing a judgement stores "unreviewed" rather
-    than removing the row.
-
-    1.7 is additive, and adds the first path here that is neither an
-    authentication mechanic nor admin only: POST /ask-ai, the ask-ai
-    widget's serving endpoint. No existing path, field or status code
-    changed.
-
-    It is gated on authentication rather than on the admin check, and
-    that is the shape of the feature rather than an oversight: the
-    widget answers questions about the caller's OWN account. The
-    identity is the verified token and nothing else — the request body
-    has no field that can name a user, and the engine's widget surface
-    discards whatever identity the model produced and substitutes the
-    one this API verified. 1.5's /admin/settings/ask-ai-widget
-    configures it and stays admin only; which entities it will answer
-    over is one of those settings, and a question naming anything
-    outside that set is refused before any query runs.
-
-    Read-only, like every other AI-assisted surface here: it answers a
-    question and records nothing, and nothing in it can take an action
-    on the caller's account or anyone else's. It is also the first path
-    whose behaviour depends on a settings write taking effect without a
-    restart — it reads the stored provider configuration on every
-    question, so a change saved through 1.5 is in force on the next one.
-
-    1.8 is the SQLite backend, and it is the first version here that
-    is not additive in the usual sense: no path was added, removed or
-    reshaped, and no success response changed, but every path under
-    /admin can now answer 501 not_implemented_on_sqlite on a
-    deployment started with SQLITE_PATH instead of DATABASE_URL. That
-    is one decision rather than 25: the console's tables (operators,
-    user_metadata, webhook_deliveries, shipped_log_events,
-    digest_runs, settings, reviewed_anomalies) are Postgres-only, and
-    RequireAdmin depends on operators, so the entire console is
-    unavailable rather than parts of it. A client that reads 501 from
-    an /admin path as "this operator lacks access" will be misreading
-    it — the deployment has no console for anyone, including a
-    legitimate operator. The alternative considered was letting the
-    existing 403 happen, which would have said exactly that misleading
-    thing to every caller on such a deployment.
-
-    Everything outside /admin works on both backends, with one
-    exception worth naming because it is not an /admin path: POST
-    /ask-ai answers 404 not_configured on SQLite, since the provider
-    configuration it reads lives in the Postgres-only settings table.
-    That 404 is the same shape the path already gives on a Postgres
-    deployment with no provider configured.
-
-    A SQLite deployment issues tokens normally, so a client cannot
-    detect the backend from an auth response — only from an /admin
-    path's 501, or from that 404 on POST /ask-ai.
+    SQLite supports the core authentication API. Admin endpoints require
+    PostgreSQL and return 501 not_implemented_on_sqlite on SQLite.
+    POST /ask-ai requires a configured AI provider and is unavailable
+    on SQLite.
 servers:
   - url: http://localhost:8080/v1
     description: Local dev
