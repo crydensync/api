@@ -1,2 +1,5 @@
 .env
 api_server
+api
+*.exe
+*.bin
