@@ -1,5 +1,14 @@
 # api
 
+<div align="center">
+
+[![Go Reference](https://pkg.go.dev/badge/github.com/crydensync/cryden/v2.svg)](https://pkg.go.dev/github.com/crydensync/cryden/v2)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![GitHub Stars](https://img.shields.io/github/stars/crydensync/api?style=social)](https://github.com/crydensync/api/stargazers)
+[![GitHub Forks](https://img.shields.io/github/forks/crydensync/api?style=social)](https://github.com/crydensync/api/network/members)
+
+</div>
+
 A generic HTTP wrapper around [CrydenSync](https://github.com/crydensync/cryden) — self-hosted, not a hosted multi-tenant service. Deploy your own instance next to your own Postgres; this is not a shared server other people's apps connect to.
 
 Every consumer talks to this over plain HTTP — no Go required. This is what a JS/Python SDK calls under the hood, and what you can call directly with `curl`/`fetch` in the meantime.
@@ -588,4 +597,10 @@ The LLM API key and the database connection string are sealed with **AES-256-GCM
 
 ## License
 
-MIT
+MIT, see [LICENSE](./LICENSE).
+
+---
+
+<div align="center">
+  <sub>Built with ❤️ in Africa · Own your users, not vendor lock-in</sub>
+</div>
