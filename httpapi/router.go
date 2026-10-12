@@ -55,6 +55,14 @@ type Deps struct {
 	// not gain one (see usermeta's package doc).
 	Meta usermeta.Store
 
+	// OAuth and TOTP back the admin user actions: an operator unlinking
+	// a provider from an account, or removing an account's second
+	// factor. The same instances the engine holds, like Users and
+	// Sessions above: an admin action against a second copy of a store
+	// would change data the engine cannot see.
+	OAuth store.OAuthStore
+	TOTP  store.TOTPStore
+
 	// Hooks backs the admin webhook delivery log. Nil unless WEBHOOK_URL is
 	// set, because the log is only written by a running delivery worker —
 	// there is nothing to report on in a deployment that dispatches no
@@ -121,6 +129,7 @@ func NewRouter(d Deps) http.Handler {
 	security := &SecurityHandlers{Audit: d.Audit, Users: d.Users, Config: d.Config}
 	metadata := &MetadataHandlers{Users: d.Users, Meta: d.Meta}
 	users := &UserHandlers{Engine: engine, Users: d.Users, Sessions: d.Sessions, Audit: d.Audit}
+	userActions := &UserActionHandlers{Engine: engine, Users: d.Users, Sessions: d.Sessions, Audit: d.Audit, OAuth: d.OAuth, TOTP: d.TOTP}
 	hooks := &WebhookHandlers{Store: d.Hooks}
 	logging := &LoggingHandlers{Store: d.Shipped}
 	digests := &DigestHandlers{Engine: engine, Store: d.Digests}
@@ -288,6 +297,32 @@ func NewRouter(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/admin/users", adminOnly(users.List))
 	mux.HandleFunc("GET /v1/admin/users/{userID}", adminOnly(func(w http.ResponseWriter, r *http.Request) {
 		users.Detail(w, r, r.PathValue("userID"))
+	}))
+
+	// The account actions. Every one changes an account that is not the
+	// operator's, which is what kept this surface unwritten until the
+	// console needed it (see UserActionHandlers for why the read-only
+	// position gave way, and what is still absent on purpose). All of
+	// them sit behind the same adminOnly gate as the reads above, and
+	// every one records its own audit event naming the operator.
+	mux.HandleFunc("POST /v1/admin/users", adminOnly(userActions.Create))
+	mux.HandleFunc("POST /v1/admin/users/{userID}/unlock", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+		userActions.Unlock(w, r, r.PathValue("userID"))
+	}))
+	mux.HandleFunc("POST /v1/admin/users/{userID}/suspend", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+		userActions.Suspend(w, r, r.PathValue("userID"))
+	}))
+	mux.HandleFunc("POST /v1/admin/users/{userID}/unsuspend", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+		userActions.Unsuspend(w, r, r.PathValue("userID"))
+	}))
+	mux.HandleFunc("POST /v1/admin/users/{userID}/revoke-sessions", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+		userActions.RevokeSessions(w, r, r.PathValue("userID"))
+	}))
+	mux.HandleFunc("POST /v1/admin/users/{userID}/mfa/disable", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+		userActions.DisableTOTP(w, r, r.PathValue("userID"))
+	}))
+	mux.HandleFunc("DELETE /v1/admin/users/{userID}/oauth/{provider}", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+		userActions.UnlinkOAuth(w, r, r.PathValue("userID"), r.PathValue("provider"))
 	}))
 
 	// Per-user metadata — the table behind JWT claim mapping. Per key
