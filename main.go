@@ -47,9 +47,10 @@ import (
 	"github.com/crydensync/api/webhook"
 )
 
-// usage is what an unrecognised argument prints. It names the two things
-// the binary does rather than listing flags, because there are no flags:
-// `migrate` takes only --baseline and the server takes only env vars.
+// usage is what an unrecognised argument prints. It names the things the
+// binary does rather than listing every flag, because there are almost
+// none: `migrate` takes only --baseline, `env` takes none, and the server
+// takes only env vars.
 const usage = `usage: api [command]
 
   (no command)   run the server, applying any pending migrations first
@@ -58,7 +59,10 @@ const usage = `usage: api [command]
                  --baseline  record every embedded migration as already
                              applied, running none of them. For a Postgres
                              database that has this schema but no
-                             schema_migrations table — see migrate.go`
+                             schema_migrations table — see migrate.go
+  env            print the example configuration to stdout: "api env > .env"
+                 gives a fresh deployment the full commented template to
+                 edit. Prints only, never writes a file itself`
 
 func main() {
 	// Dispatch before config.Load, deliberately. `api --help` on a machine
@@ -76,6 +80,8 @@ func main() {
 		serve()
 	case args[0] == "migrate":
 		runMigrate(args[1:])
+	case args[0] == "env":
+		runEnv(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s\n", args[0], usage)
 		os.Exit(2)

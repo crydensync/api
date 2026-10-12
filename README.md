@@ -20,6 +20,21 @@ Every consumer talks to this over plain HTTP no Go required. This is what a JS/P
 
 ## Getting started
 
+The no-clone path: install the binary, print its example configuration, edit, run.
+
+```bash
+go install github.com/crydensync/api@latest
+
+mkdir api-test && cd api-test
+api env > .env   # the full commented template, embedded in the binary
+# edit .env: set DATABASE_URL (or SQLITE_PATH), JWT_SECRET, CORS_ORIGINS
+api
+```
+
+`api env` prints only; it never writes a file, and `> .env` overwrites one you already have, so run it once. Because the template is embedded at build time, the copy `api env` prints is the exact variable set that binary reads, so an upgrade that adds settings can be diffed with `api env > .env.new && diff .env .env.new`.
+
+With the repo cloned, the equivalent is:
+
 ```bash
 git clone https://github.com/crydensync/api
 cd api
