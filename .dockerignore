@@ -6,7 +6,10 @@
 *.md
 docs
 .env
-.env.*
+# .env.example stays: `api env` embeds it with go:embed, so the Docker
+# build needs it — the image's binary prints the same template as a
+# `go install`ed one. Dotfiles the developer wrote (their .env) stay out.
+!.env.example
 # A local SQLite database is the one thing that must never end up baked
 # into an image: it is a deployment's live data, and a stale copy in a
 # layer is both a leak and a confusing bug.
