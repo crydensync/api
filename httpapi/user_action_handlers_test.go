@@ -57,11 +57,11 @@ func newUserActionFixture(t *testing.T) userActionFixture {
 	})
 
 	engine, err := cryden.New(cryden.Config{
-		JWTSecret:     "test-secret",
-		Users:         users,
-		Sessions:      sessions,
-		Audit:         audit,
-		Verifications: memory.NewVerificationStore(),
+		JWTSecret:       "test-secret",
+		Users:           users,
+		Sessions:        sessions,
+		Audit:           audit,
+		Verifications:   memory.NewVerificationStore(),
 		EmailSender:     stubMailSender{},
 		MagicLinkSender: stubMailSender{},
 		APIKeys:         memory.NewAPIKeyStore(),
