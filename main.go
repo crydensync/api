@@ -604,6 +604,13 @@ func serve() {
 
 		Sessions: sessions,
 
+		// The admin user actions need the same store instances the
+		// engine holds (see httpapi.Deps). On SQLite these are nil and
+		// every route that would use them is behind AdminOnly's flat 501
+		// anyway.
+		OAuth: st.oauth,
+		TOTP:  st.totp,
+
 		Shipped: shippedLog,
 
 		Digests: digestStore,

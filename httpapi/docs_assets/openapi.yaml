@@ -315,21 +315,26 @@ components:
             to conclude the account is gone.
         query: { type: string, description: The search that produced this page, empty when browsing. }
 
-    AdminUserDetail:
-      type: object
-      properties:
-        user: { $ref: '#/components/schemas/AdminUser' }
-        active_sessions:
-          type: integer
-          description: >
-            A count, not a list, deliberately. The engine's session store
-            returns only live sessions, so the count is honest; listing
-            them would publish every IP and user agent an account has
-            signed in from to anyone holding an operator token.
         recent_activity:
           type: array
           description: The account's own audit history, newest first, capped at 20.
           items: { $ref: '#/components/schemas/AuditEvent' }
+
+    AdminActionDTO:
+      type: object
+      description: >
+        The answer every admin user action returns: the account as it
+        stands after the action, so a console re-renders from the answer
+        rather than issuing a second GET. `user` is the same AdminUser
+        the list and detail views carry, so one shape is all a client
+        parses. `detail` is present only when the action has a number or
+        a name worth reporting (how many sessions were revoked, which
+        provider was unlinked).
+      properties:
+        user: { $ref: '#/components/schemas/AdminUser' }
+        detail:
+          type: string
+          description: A short human-readable note about what the action did. Absent when the action needs no explaining.
 
     AuditEvent:
       type: object
@@ -1683,15 +1688,229 @@ paths:
               schema:
                 type: object
                 properties:
-                  data: { $ref: '#/components/schemas/UserMetadata' }
-        '401': { $ref: '#/components/responses/Unauthorized' }
-        '403': { $ref: '#/components/responses/Forbidden' }
-        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
         '404':
           description: >
             metadata_key_not_found when the user has no such key;
             not_found for an unknown or malformed userID; not_configured
             when the stores are absent.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/users/{userID}/unlock:
+    post:
+      summary: Clear a lockout and its failed-attempt counter
+      description: >
+        Admin only. The operation the engine's own CLI runs as
+        "users unlock": ResetFailedAttempts, which clears both the
+        failed-attempt counter and the lockout deadline together. An
+        account that is not locked is unlocked anyway rather than
+        refused, because the goal is an account that can sign in, not a
+        report about a lock. Audited with the operator's id.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: userID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The account as it stands after the unlock.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AdminActionDTO' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_found for an unknown or malformed userID, or not_configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/users/{userID}/suspend:
+    post:
+      summary: Suspend an account until an operator lifts it
+      description: >
+        Admin only. Sets a lockout roughly a century out and revokes the
+        account's live sessions, so a session granted before the
+        suspension cannot outlive the lock it was granted under. A
+        suspended account's sign-in is refused by the engine's normal
+        lockout path, which is what makes this a suspension rather than
+        a second lockout implementation.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: userID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The suspended account.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AdminActionDTO' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_found for an unknown or malformed userID, or not_configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/users/{userID}/unsuspend:
+    post:
+      summary: Clear a suspension (or any lockout) from an account
+      description: >
+        Admin only. The same engine operation as unlock
+        (ResetFailedAttempts clears both the counter and the lockout),
+        kept as a separate endpoint so the audit trail records which
+        kind of lift happened: lifting a suspension an operator imposed
+        is a different sentence in the history than clearing a lockout
+        the engine imposed at the fifth failed password.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: userID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The account, unlocked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AdminActionDTO' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_found for an unknown or malformed userID, or not_configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/users/{userID}/revoke-sessions:
+    post:
+      summary: Revoke every live session an account holds
+      description: >
+        Admin only. The engine's own revoke-all, behind the admin gate
+        and an audit event. The response reports how many sessions were
+        live when the call landed, which is the number an operator reads
+        rather than a count they would have to derive from a
+        before-and-after diff.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: userID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: >
+            The account, with `detail` naming how many live sessions
+            were revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AdminActionDTO' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: not_found for an unknown or malformed userID, or not_configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/users/{userID}/mfa/disable:
+    post:
+      summary: Remove an account's TOTP enrolment without the holder's password
+      description: >
+        Admin only. The engine's own TOTP disable requires the account
+        holder's password, because it exists for the holder changing
+        their own settings; an operator acting on somebody else's account
+        has no password to give. This action deletes the enrolment
+        directly, records its own audit event with the operator's id,
+        and revokes the account's sessions with the enrolment, so access
+        held through the removed factor does not outlive its removal. A
+        fresh login afterwards needs only the password.
+
+        An account with no enrolment answers 404, the same as any other
+        missing resource, rather than a success an operator cannot
+        distinguish from work done.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: userID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          description: The account, whose second factor is now gone.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AdminActionDTO' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: >
+            not_found for an unknown or malformed userID, no enrolment to
+            remove, or not_configured.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /admin/users/{userID}/oauth/{provider}:
+    delete:
+      summary: Remove one OAuth identity from an account
+      description: >
+        Admin only. The operator's version of the engine's own unlink:
+        found by listing the account's identities and matching the
+        provider, so a provider the account never linked is a 404 rather
+        than a silent success. Audited with the operator's id.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: userID
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: The account after the unlink.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/AdminActionDTO' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+        '404':
+          description: >
+            not_found when the account has no linked identity for that
+            provider, or the userID is unknown or malformed;
+            not_configured when the stores are absent.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
