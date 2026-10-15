@@ -34,24 +34,24 @@ import (
 	"github.com/crydensync/cryden/v2/store/sqlite"
 	"github.com/crydensync/cryden/v2/token"
 
-	"github.com/crydensync/api/anomalyreview"
-	"github.com/crydensync/api/askai"
-	"github.com/crydensync/api/config"
-	"github.com/crydensync/api/digest"
-	"github.com/crydensync/api/httpapi"
-	"github.com/crydensync/api/operator"
-	"github.com/crydensync/api/settings"
-	"github.com/crydensync/api/shiplog"
-	"github.com/crydensync/api/templates"
-	"github.com/crydensync/api/usermeta"
-	"github.com/crydensync/api/webhook"
+	"github.com/crydensync/csag/anomalyreview"
+	"github.com/crydensync/csag/askai"
+	"github.com/crydensync/csag/config"
+	"github.com/crydensync/csag/digest"
+	"github.com/crydensync/csag/httpapi"
+	"github.com/crydensync/csag/operator"
+	"github.com/crydensync/csag/settings"
+	"github.com/crydensync/csag/shiplog"
+	"github.com/crydensync/csag/templates"
+	"github.com/crydensync/csag/usermeta"
+	"github.com/crydensync/csag/webhook"
 )
 
 // usage is what an unrecognised argument prints. It names the things the
 // binary does rather than listing every flag, because there are almost
 // none: `migrate` takes only --baseline, `env` takes none, and the server
 // takes only env vars.
-const usage = `usage: api [command]
+const usage = `usage: csag [command]
 
   (no command)   run the server, applying any pending migrations first
                  unless SKIP_AUTO_MIGRATE=true
@@ -60,16 +60,16 @@ const usage = `usage: api [command]
                              applied, running none of them. For a Postgres
                              database that has this schema but no
                              schema_migrations table — see migrate.go
-  env            print the example configuration to stdout: "api env > .env"
+  env            print the example configuration to stdout: "csag env > .env"
                  gives a fresh deployment the full commented template to
                  edit. Prints only, never writes a file itself
   version        print the release this binary was built from — the tag
                  name for release builds, "dev" for a working-tree build`
 
 func main() {
-	// Dispatch before config.Load, deliberately. `api --help` on a machine
+	// Dispatch before config.Load, deliberately. `csag --help` on a machine
 	// with no .env should print usage, not a complaint about JWT_SECRET,
-	// and `api migrate` with a typo'd command should not half-load a
+	// and `csag migrate` with a typo'd command should not half-load a
 	// config first.
 	args := os.Args[1:]
 	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help" || args[0] == "help") {
@@ -92,7 +92,7 @@ func main() {
 	}
 }
 
-// runMigrate is `api migrate`: bring the schema up to date, say what
+// runMigrate is `csag migrate`: bring the schema up to date, say what
 // happened, exit. No server, no router, no engine — this is the command a
 // SKIP_AUTO_MIGRATE deployment runs as its controlled deploy step, so it
 // must not be able to start accepting traffic even by accident.
@@ -133,7 +133,7 @@ func runMigrate(args []string) {
 }
 
 // openDatabase opens and pings the configured backend. Shared by the
-// server and `api migrate` so the two cannot drift into connecting
+// server and `csag migrate` so the two cannot drift into connecting
 // differently — a migration applied over a connection with different
 // pragmas is not the same migration.
 func openDatabase(cfg config.Config) (*sql.DB, error) {
@@ -179,7 +179,7 @@ func serve() {
 	// the first query that touches it, which is a confusing 500 rather
 	// than a clear startup error.
 	if cfg.SkipAutoMigrate {
-		log.Printf("SKIP_AUTO_MIGRATE is set: starting without applying migrations. Run `api migrate` as a separate step — see README's note on migrations")
+		log.Printf("SKIP_AUTO_MIGRATE is set: starting without applying migrations. Run `csag migrate` as a separate step — see README's note on migrations")
 	} else {
 		msg, err := migrate(context.Background(), db, cfg.UsesSQLite())
 		if err != nil {
@@ -318,7 +318,7 @@ func serve() {
 	// Otherwise always constructed: NewSecrets treats an unset
 	// SETTINGS_ENCRYPTION_KEY as "this feature is off" rather than as a
 	// startup failure, and the handlers then answer 404 not_configured,
-	// matching how every other optional feature in this api behaves. Only
+	// matching how every other optional feature in this csag behaves. Only
 	// the key being *malformed* is fatal, and that is a configuration
 	// mistake worth refusing to boot on.
 	var settingsSecrets *settings.Secrets
@@ -668,7 +668,7 @@ func serve() {
 		listenerErr <- err
 	}()
 
-	log.Printf("api listening on :%s (CORS origins: %v)", cfg.Port, cfg.CORSOrigins)
+	log.Printf("csag listening on :%s (CORS origins: %v)", cfg.Port, cfg.CORSOrigins)
 
 	var serveErr error
 	select {
@@ -719,7 +719,7 @@ func serve() {
 	// closing the database is what checkpoints the WAL on SQLite, and the
 	// os.Exit in log.Fatalf below would skip a defer. On a SQLite
 	// deployment this call is the difference between a schema that is in
-	// api.db and a schema that is only in api.db-wal.
+	// csag.db and a schema that is only in csag.db-wal.
 	if err := db.Close(); err != nil {
 		log.Printf("closing the database: %v", err)
 	}

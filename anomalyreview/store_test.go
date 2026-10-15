@@ -18,7 +18,7 @@ func reviewFixture() *MemoryStore {
 	return s
 }
 
-// The rule has to be exact: a status this api does not define must not be
+// The rule has to be exact: a status this csag does not define must not be
 // storable, and "Confirmed" is not "confirmed".
 func TestValidateStatusAcceptsExactlyTheThreeDefinedStatuses(t *testing.T) {
 	for _, status := range Statuses() {

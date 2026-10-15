@@ -61,7 +61,7 @@ type LLMProviderConfig struct {
 // enforcing it in the wrong layer.
 func (c LLMProviderConfig) Validate() error {
 	if c.Kind != LLMProviderKindAnthropic {
-		return fmt.Errorf("%w: unknown provider kind %q, this api can only build %q",
+		return fmt.Errorf("%w: unknown provider kind %q, this csag can only build %q",
 			ErrInvalidLLMProvider, c.Kind, LLMProviderKindAnthropic)
 	}
 	if strings.TrimSpace(c.Model) == "" {

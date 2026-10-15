@@ -11,11 +11,11 @@ import (
 	"github.com/crydensync/cryden/v2/token"
 	"github.com/crydensync/cryden/v2/widget"
 
-	"github.com/crydensync/api/aiprovider"
-	"github.com/crydensync/api/anomalyreview"
-	"github.com/crydensync/api/askai"
-	"github.com/crydensync/api/settings"
-	"github.com/crydensync/api/usermeta"
+	"github.com/crydensync/csag/aiprovider"
+	"github.com/crydensync/csag/anomalyreview"
+	"github.com/crydensync/csag/askai"
+	"github.com/crydensync/csag/settings"
+	"github.com/crydensync/csag/usermeta"
 )
 
 // apiError is the (status, code, message) triple every handler

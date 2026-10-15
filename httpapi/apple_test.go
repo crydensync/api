@@ -18,7 +18,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 
-	"github.com/crydensync/api/config"
+	"github.com/crydensync/csag/config"
 )
 
 const (

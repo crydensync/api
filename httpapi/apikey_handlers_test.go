@@ -10,7 +10,7 @@ import (
 
 	"github.com/crydensync/cryden/v2"
 
-	"github.com/crydensync/api/config"
+	"github.com/crydensync/csag/config"
 )
 
 // apiKeyFixture is one signed-up, logged-in user plus the router built on

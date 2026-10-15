@@ -22,9 +22,9 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: api
-          POSTGRES_PASSWORD: api_test
-          POSTGRES_DB: api_test
+          POSTGRES_USER: csag_test_user
+          POSTGRES_PASSWORD: csag_test
+          POSTGRES_DB: csag_test
         ports:
           - 5432:5432
         options: >-
@@ -57,12 +57,12 @@ jobs:
       # hand and left the runner on the happy path untested.
       - name: Start server and run smoke test
         run: |
-          go build -o api_server .
-          ./api_server &
+          go build -o csag_server .
+          ./csag_server &
           sleep 2
           cd internal/smoketest && go run . http://localhost:8080
         env:
-          DATABASE_URL: postgres://api:api_test@localhost:5432/api_test?sslmode=disable
+          DATABASE_URL: postgres://csag_test_user:csag_test@localhost:5432/csag_test?sslmode=disable
           JWT_SECRET: ci-test-secret-not-for-prod
           CORS_ORIGINS: http://localhost:5173
           PORT: 8080
@@ -81,10 +81,10 @@ jobs:
           do
             GOOS="${target%/*}"
             GOARCH="${target#*/}"
-            name="api_${GOOS}_${GOARCH}"
+            name="csag_${GOOS}_${GOARCH}"
             [ "$GOOS" = windows ] && name="${name}.exe"
             echo "building $name"
-            # main.version is what `api version` prints. GITHUB_REF_NAME
+            # main.version is what `csag version` prints. GITHUB_REF_NAME
             # is the tag that triggered this run, so a release binary
             # names its own tag; see version_cmd.go.
             CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \

@@ -61,7 +61,7 @@ func NewSecrets(store Store, key string) (*Secrets, error) {
 
 // Configured reports whether a key is set. Handlers use it to answer 404
 // not_configured, the same shape every other unconfigured feature in this
-// api uses, rather than surfacing ErrNoEncryptionKey as a server fault.
+// csag uses, rather than than surfacing ErrNoEncryptionKey as a server fault.
 func (s *Secrets) Configured() bool {
 	return s != nil && s.encryptor != nil
 }

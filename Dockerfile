@@ -19,11 +19,11 @@ COPY . .
 # -trimpath keeps the build directory out of the binary; -s -w drop the
 # symbol table and DWARF data. Together they are most of the size, and
 # nothing here debugs a stripped binary by hand. VERSION is stamped into
-# what `api version` prints — the release workflow passes the tag it is
+# what `csag version` prints — the release workflow passes the tag it is
 # building, so the image's binary answers "which release am I?" the same
 # way the cross-compiled ones do.
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /api .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /csag .
 
 # alpine rather than scratch or distroless, for one concrete reason: this
 # image has to be able to write a SQLite database to a mounted volume, and
@@ -37,26 +37,26 @@ FROM alpine:3.20
 # what alpine ships — anything that gets added here is attack surface in a
 # container that only ever runs one binary.
 RUN apk add --no-cache ca-certificates && \
-    adduser -D -u 10001 -h /home/api api
+    adduser -D -u 10001 -h /home/csag csag
 
-COPY --from=build /api /usr/local/bin/api
+COPY --from=build /csag /usr/local/bin/csag
 
 # A SQLite deployment needs somewhere to put the database that is not the
 # container's writable layer, or every `docker compose up --build` is a
 # new database. /data is that place; a Postgres deployment ignores it.
-RUN mkdir -p /data && chown api:api /data
+RUN mkdir -p /data && chown csag:csag /data
 VOLUME ["/data"]
 
-USER api
+USER csag
 
 # 8080 is config.Load's default for PORT, so an image run with no PORT set
 # listens where this line says it does.
 EXPOSE 8080
 
 # Exec form, deliberately, and the reason is SIGTERM. Shell form
-# (`CMD /usr/local/bin/api`) runs the binary as a child of /bin/sh, which
+# (`CMD /usr/local/bin/csag`) runs the binary as a child of /bin/sh, which
 # means `docker stop` signals the shell and the binary — and its
 # in-flight requests — never see it. That would undo the whole point of
 # main.go's graceful shutdown, so this line is load-bearing rather than
 # stylistic.
-ENTRYPOINT ["/usr/local/bin/api"]
+ENTRYPOINT ["/usr/local/bin/csag"]

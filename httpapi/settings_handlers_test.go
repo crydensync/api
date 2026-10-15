@@ -12,7 +12,7 @@ import (
 	"github.com/crydensync/cryden/v2/store/memory"
 	"github.com/crydensync/cryden/v2/token"
 
-	"github.com/crydensync/api/settings"
+	"github.com/crydensync/csag/settings"
 )
 
 // testSettingsKey is the deployment key these tests seal with. Not a

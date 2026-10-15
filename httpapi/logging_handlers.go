@@ -8,7 +8,7 @@ import (
 
 	"github.com/crydensync/cryden/v2/logger"
 
-	"github.com/crydensync/api/shiplog"
+	"github.com/crydensync/csag/shiplog"
 )
 
 // LoggingHandlers answers the admin view of the shipped-events log.

@@ -8,7 +8,7 @@ import (
 
 	"github.com/crydensync/cryden/v2"
 
-	"github.com/crydensync/api/config"
+	"github.com/crydensync/csag/config"
 )
 
 type contextKey string

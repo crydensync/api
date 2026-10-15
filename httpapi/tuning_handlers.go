@@ -7,7 +7,7 @@ import (
 	"github.com/crydensync/cryden/v2/admin"
 	"github.com/crydensync/cryden/v2/store"
 
-	"github.com/crydensync/api/config"
+	"github.com/crydensync/csag/config"
 )
 
 // TuningHandlers answers the config tuning advisor.

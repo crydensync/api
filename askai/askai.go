@@ -30,8 +30,8 @@ import (
 	crydenai "github.com/crydensync/cryden/v2/ai"
 	"github.com/crydensync/cryden/v2/widget"
 
-	"github.com/crydensync/api/aiprovider"
-	"github.com/crydensync/api/settings"
+	"github.com/crydensync/csag/aiprovider"
+	"github.com/crydensync/csag/settings"
 )
 
 // maxQuestionLength bounds one question. This is chat copy typed into a
@@ -43,7 +43,7 @@ var (
 	// ErrNotConfigured means the widget is switched on but the
 	// deployment has no LLM provider or no read-only database stored,
 	// so there is nothing to answer with. A wiring fact, not a fault —
-	// mapped to 404 like every other unconfigured feature in this api.
+	// mapped to 404 like every other unconfigured feature in this csag.
 	ErrNotConfigured = errors.New("askai: the widget has no LLM provider or database configured")
 
 	// ErrWidgetDisabled means an operator has switched the widget off.

@@ -11,8 +11,8 @@ import (
 	crydenai "github.com/crydensync/cryden/v2/ai"
 	"github.com/crydensync/cryden/v2/widget"
 
-	"github.com/crydensync/api/aiprovider"
-	"github.com/crydensync/api/settings"
+	"github.com/crydensync/csag/aiprovider"
+	"github.com/crydensync/csag/settings"
 )
 
 // owner is the identity this repo's authentication would have supplied.

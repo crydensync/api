@@ -1411,7 +1411,7 @@ paths:
         configured at all, and whether its authorize endpoint answers.
         A probe is a bare GET with no OAuth parameters, so it can neither
         start nor complete a login; providers left unconfigured are
-        reported without being probed. This is api-side logic, not an
+        reported without being probed. This is csag-side logic, not an
         engine feature: cryden knows whether a provider is configured,
         not whether it is reachable.
       security: [{ bearerAuth: [] }]

@@ -13,7 +13,7 @@ import (
 	"github.com/crydensync/cryden/v2/store/memory"
 	"github.com/crydensync/cryden/v2/token"
 
-	"github.com/crydensync/api/config"
+	"github.com/crydensync/csag/config"
 )
 
 // supportResponse mirrors the endpoint's DTO field by field, so a renamed

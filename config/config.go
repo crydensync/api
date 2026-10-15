@@ -26,7 +26,7 @@ type Config struct {
 	EdgeRateLimit       int
 	EdgeRateLimitWindow time.Duration
 
-	// BaseURL is this api deployment's own public URL, used to build
+	// BaseURL is this csag deployment's own public URL, used to build
 	// OAuth callback URLs (e.g. BaseURL + "/v1/oauth/google/callback")
 	// that get registered with each provider's console.
 	BaseURL string
@@ -425,7 +425,7 @@ func Load() (Config, error) {
 	// Auto-migration. Defaults to false, so a deployment migrates on boot
 	// unless it says otherwise; the opt-out is for teams who want schema
 	// changes to be a reviewed, separate step rather than something that
-	// happens silently during a rolling deploy. `api migrate` is the step.
+	// happens silently during a rolling deploy. `csag migrate` is the step.
 	if cfg.SkipAutoMigrate, err = envBool("SKIP_AUTO_MIGRATE", false); err != nil {
 		return cfg, err
 	}

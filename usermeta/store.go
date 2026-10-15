@@ -123,7 +123,7 @@ func ValidateKey(key string) error {
 		return fmt.Errorf("%w: %q is a registered JWT claim name", ErrReservedKey, key)
 	}
 	if key == RoleClaim {
-		return fmt.Errorf("%w: %q is this api's own operator claim", ErrReservedKey, key)
+		return fmt.Errorf("%w: %q is this csag's own operator claim", ErrReservedKey, key)
 	}
 	return nil
 }

@@ -15,8 +15,8 @@ import (
 	"github.com/crydensync/cryden/v2/store/memory"
 	"github.com/crydensync/cryden/v2/token"
 
-	"github.com/crydensync/api/config"
-	"github.com/crydensync/api/webhook"
+	"github.com/crydensync/csag/config"
+	"github.com/crydensync/csag/webhook"
 )
 
 // webhookClock is a clock a test moves by hand, so a listing's ordering is

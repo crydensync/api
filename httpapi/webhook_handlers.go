@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/crydensync/api/webhook"
+	"github.com/crydensync/csag/webhook"
 )
 
 // WebhookHandlers answers the admin webhook delivery log.

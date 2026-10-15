@@ -1,4 +1,4 @@
-module github.com/crydensync/api
+module github.com/crydensync/csag
 
 go 1.25.0
 

@@ -14,7 +14,7 @@ import (
 	"github.com/crydensync/cryden/v2/store/memory"
 	"github.com/crydensync/cryden/v2/token"
 
-	"github.com/crydensync/api/config"
+	"github.com/crydensync/csag/config"
 )
 
 // hashMigrationResponse mirrors the endpoint's own DTO field by field, so

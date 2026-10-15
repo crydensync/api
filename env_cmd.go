@@ -7,8 +7,8 @@ import (
 )
 
 // The example environment rides in the binary rather than being fetched
-// from anywhere: `go install github.com/crydensync/api@v1.9.0` followed by
-// `api env` then prints the variable set that exact binary reads, with no
+// from anywhere: `go install github.com/crydensync/csag@v1.9.0` followed by
+// `csag env` then prints the variable set that exact binary reads, with no
 // network, no GitHub dependency and no way for the template to drift from
 // the code that consumes it. A remote fetch would hand down main's
 // example to a pinned older binary; the embed cannot.
@@ -16,14 +16,14 @@ import (
 //go:embed .env.example
 var envExampleFS embed.FS
 
-// runEnv is `api env`: print the embedded .env.example to stdout so an
+// runEnv is `csag env`: print the embedded .env.example to stdout so an
 // install that never cloned this repo can still start from the full,
-// commented template (`api env > .env`, then edit). It loads no config and
+// commented template (`csag env > .env`, then edit). It loads no config and
 // opens no database — it is the one command that must work on a machine
 // with nothing but the binary.
 //
 // Refusing a --init-style write is a deliberate non-feature: the shell
-// redirect in `api env > .env` already truncates the target before this
+// redirect in `csag env > .env` already truncates the target before this
 // process runs, so a guard here could not see the overwrite it was meant
 // to prevent. The command is print-only and says so, and the README flow
 // says to run it once.

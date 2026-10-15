@@ -14,8 +14,8 @@ import (
 	"github.com/crydensync/cryden/v2/store/memory"
 	"github.com/crydensync/cryden/v2/token"
 
-	"github.com/crydensync/api/config"
-	"github.com/crydensync/api/shiplog"
+	"github.com/crydensync/csag/config"
+	"github.com/crydensync/csag/shiplog"
 )
 
 // logEventsResponse mirrors the endpoint's DTO field by field, so a renamed

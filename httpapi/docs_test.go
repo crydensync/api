@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/crydensync/api/config"
+	"github.com/crydensync/csag/config"
 )
 
 // specSourcePath is the hand-written spec, relative to this package's

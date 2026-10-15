@@ -1,4 +1,4 @@
-// Command smoketest exercises a running `api` instance end-to-end
+// Command smoketest exercises a running `csag` instance end-to-end
 // over real HTTP. It does NOT start the server itself — point it at
 // one that's already running:
 //

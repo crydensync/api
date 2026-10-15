@@ -46,7 +46,7 @@ var (
 	// console that acted on a stale list is told instead of being shown
 	// a success that annotates nothing.
 	ErrNoSuchEvent = errors.New("anomalyreview: no audit event with that id")
-	// ErrInvalidStatus means the status is not one this api defines.
+	// ErrInvalidStatus means the status is not one this csag defines.
 	ErrInvalidStatus = errors.New("anomalyreview: unknown review status")
 	// ErrNoteTooLong means the note is longer than a note needs to be.
 	ErrNoteTooLong = errors.New("anomalyreview: note is too long")
@@ -75,7 +75,7 @@ const (
 	StatusDismissed Status = "dismissed"
 )
 
-// Statuses returns every status this api defines, in the order a console
+// Statuses returns every status this csag defines, in the order a console
 // should offer them.
 func Statuses() []Status {
 	return []Status{StatusUnreviewed, StatusConfirmed, StatusDismissed}

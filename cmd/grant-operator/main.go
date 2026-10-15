@@ -23,7 +23,7 @@ import (
 
 	"github.com/crydensync/cryden/v2/store/postgres"
 
-	"github.com/crydensync/api/operator"
+	"github.com/crydensync/csag/operator"
 )
 
 func main() {

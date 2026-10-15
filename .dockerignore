@@ -6,7 +6,7 @@
 *.md
 docs
 .env
-# .env.example stays: `api env` embeds it with go:embed, so the Docker
+# .env.example stays: `csag env` embeds it with go:embed, so the Docker
 # build needs it — the image's binary prints the same template as a
 # `go install`ed one. Dotfiles the developer wrote (their .env) stay out.
 !.env.example
@@ -16,5 +16,5 @@ docs
 *.db
 *.db-wal
 *.db-shm
-api
-api_server
+csag
+csag_server

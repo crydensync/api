@@ -12,9 +12,9 @@ import (
 
 	"github.com/crydensync/cryden/v2/store"
 
-	"github.com/crydensync/api/anomalyreview"
-	"github.com/crydensync/api/config"
-	"github.com/crydensync/api/usermeta"
+	"github.com/crydensync/csag/anomalyreview"
+	"github.com/crydensync/csag/config"
+	"github.com/crydensync/csag/usermeta"
 )
 
 // anomalyFixture is the user fixture with the review store wired in and a

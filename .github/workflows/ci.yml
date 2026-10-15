@@ -13,9 +13,9 @@ jobs:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_USER: api
-          POSTGRES_PASSWORD: api_test
-          POSTGRES_DB: api_test
+          POSTGRES_USER: csag_test_user
+          POSTGRES_PASSWORD: csag_test
+          POSTGRES_DB: csag_test
         ports:
           - 5432:5432
         options: >-
@@ -61,11 +61,11 @@ jobs:
       # — which is exactly what this repo had never verified.
       - name: Start server (which migrates the empty database on boot)
         run: |
-          go build -o api_server .
-          ./api_server &
+          go build -o csag_server .
+          ./csag_server &
           sleep 2
         env:
-          DATABASE_URL: postgres://api:api_test@localhost:5432/api_test?sslmode=disable
+          DATABASE_URL: postgres://csag_test_user:csag_test@localhost:5432/csag_test?sslmode=disable
           JWT_SECRET: ci-test-secret-not-for-prod
           CORS_ORIGINS: http://localhost:5173
           PORT: 8080
@@ -73,12 +73,12 @@ jobs:
       - name: Run smoke test against the live server
         run: cd internal/smoketest && go run . http://localhost:8080
 
-      # `api migrate` on an already-migrated database is the no-op that
+      # `csag migrate` on an already-migrated database is the no-op that
       # every boot of every existing deployment will perform, so it is
       # worth one step of its own rather than being implied by the above.
       - name: Migrate is a no-op on an up-to-date database
-        run: ./api_server migrate
+        run: ./csag_server migrate
         env:
-          DATABASE_URL: postgres://api:api_test@localhost:5432/api_test?sslmode=disable
+          DATABASE_URL: postgres://csag_test_user:csag_test@localhost:5432/csag_test?sslmode=disable
           JWT_SECRET: ci-test-secret-not-for-prod
           CORS_ORIGINS: http://localhost:5173

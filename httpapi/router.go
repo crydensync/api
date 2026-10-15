@@ -7,14 +7,14 @@ import (
 	"github.com/crydensync/cryden/v2"
 	"github.com/crydensync/cryden/v2/store"
 
-	"github.com/crydensync/api/anomalyreview"
-	"github.com/crydensync/api/askai"
-	"github.com/crydensync/api/config"
-	"github.com/crydensync/api/digest"
-	"github.com/crydensync/api/settings"
-	"github.com/crydensync/api/shiplog"
-	"github.com/crydensync/api/usermeta"
-	"github.com/crydensync/api/webhook"
+	"github.com/crydensync/csag/anomalyreview"
+	"github.com/crydensync/csag/askai"
+	"github.com/crydensync/csag/config"
+	"github.com/crydensync/csag/digest"
+	"github.com/crydensync/csag/settings"
+	"github.com/crydensync/csag/shiplog"
+	"github.com/crydensync/csag/usermeta"
+	"github.com/crydensync/csag/webhook"
 )
 
 // Deps is everything the route table needs to build its handlers. It is a

@@ -5,7 +5,7 @@
 // cryden's docs/design-decisions.md: authorization is a host
 // decision, the engine only owns authentication mechanics). Which
 // cryden users are console operators, and what role they hold, is a
-// decision this api layer makes on top, backed by its own table
+// decision this csag layer makes on top, backed by its own table
 // (migrations/003_operators.up.sql) keyed off cryden's own user id.
 //
 // It is its own package, not a file in package main, so both the

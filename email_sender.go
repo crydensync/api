@@ -5,12 +5,12 @@ import (
 	"log"
 	"net/url"
 
-	"github.com/crydensync/api/templates"
+	"github.com/crydensync/csag/templates"
 )
 
 // consoleEmailSender is a dev stand-in implementing notify.EmailSender.
 // Real deployments must replace this with a real provider (SES,
-// SendGrid, Resend, Postmark) — see the api README.
+// SendGrid, Resend, Postmark) — see the csag README.
 //
 // Templates is optional. Nil means no EMAIL_TEMPLATE_DIR was configured,
 // and the built-in line below is printed exactly as it always was; a
@@ -45,7 +45,7 @@ func (s *consoleEmailSender) SendVerification(ctx context.Context, to string, ra
 // apart: "click to log in" is a different message from "confirm your
 // new email").
 type consoleMagicLinkSender struct {
-	// BaseURL is this api deployment's own public URL. cryden hands over
+	// BaseURL is this csag deployment's own public URL. cryden hands over
 	// only the raw token — the engine has no concept of your routing, so
 	// the clickable link is assembled here. Real deployments should point
 	// this at their own frontend route that reads ?token= and POSTs it to

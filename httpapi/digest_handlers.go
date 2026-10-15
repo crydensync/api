@@ -6,7 +6,7 @@ import (
 
 	"github.com/crydensync/cryden/v2"
 
-	"github.com/crydensync/api/digest"
+	"github.com/crydensync/csag/digest"
 )
 
 // DigestHandlers answers the admin digest endpoints: the report itself,

@@ -6,7 +6,7 @@ import (
 
 	"github.com/crydensync/cryden/v2/store"
 
-	"github.com/crydensync/api/usermeta"
+	"github.com/crydensync/csag/usermeta"
 )
 
 // MetadataHandlers answers the admin per-user metadata endpoints — the

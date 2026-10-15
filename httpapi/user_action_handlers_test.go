@@ -13,8 +13,8 @@ import (
 	"github.com/crydensync/cryden/v2/store"
 	"github.com/crydensync/cryden/v2/store/memory"
 
-	"github.com/crydensync/api/config"
-	"github.com/crydensync/api/usermeta"
+	"github.com/crydensync/csag/config"
+	"github.com/crydensync/csag/usermeta"
 )
 
 // userActionFixture is userFixture's shape with the two extra stores the

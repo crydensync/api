@@ -5,7 +5,7 @@ import (
 	"os"
 )
 
-// version is what `api version` prints. It is empty in a plain `go
+// version is what `csag version` prints. It is empty in a plain `go
 // build` and stamped at link time by the release workflow: `-X
 // main.version=$GITHUB_REF_NAME` names the tag that produced the
 // binary, so an installed binary can answer the question "which
@@ -18,7 +18,7 @@ import (
 // without pretending a tag it cannot name.
 var version = "dev"
 
-// runVersion is `api version`: print the stamped version and exit. It
+// runVersion is `csag version`: print the stamped version and exit. It
 // is dispatched before config.Load like migrate and env — a binary on a
 // machine with no .env must still be able to say what it is.
 func runVersion(args []string) {
@@ -26,5 +26,5 @@ func runVersion(args []string) {
 		fmt.Fprintf(os.Stderr, "unknown flag %q for `version`\n\n%s\n", a, usage)
 		os.Exit(2)
 	}
-	fmt.Printf("api %s\n", version)
+	fmt.Printf("csag %s\n", version)
 }

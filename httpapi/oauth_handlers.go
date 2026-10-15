@@ -16,7 +16,7 @@ import (
 	"github.com/crydensync/cryden/v2"
 	"github.com/crydensync/cryden/v2/auth"
 
-	"github.com/crydensync/api/config"
+	"github.com/crydensync/csag/config"
 )
 
 // oauthStateCookie is the name of the short-lived cookie holding the

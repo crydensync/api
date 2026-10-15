@@ -12,8 +12,8 @@ import (
 	"github.com/crydensync/cryden/v2"
 	"github.com/crydensync/cryden/v2/store/sqlite"
 
-	"github.com/crydensync/api/config"
-	"github.com/crydensync/api/httpapi"
+	"github.com/crydensync/csag/config"
+	"github.com/crydensync/csag/httpapi"
 )
 
 // testPassword is the same value the httpapi fixtures use — long enough to
@@ -27,7 +27,7 @@ const testPassword = "correct-horse-battery-staple-42"
 // equivalent one does.
 func openTestSQLite(t *testing.T) *sql.DB {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "api.db")
+	path := filepath.Join(t.TempDir(), "csag.db")
 	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		t.Fatalf("opening %s: %v", path, err)
@@ -56,9 +56,9 @@ func openTestSQLite(t *testing.T) *sql.DB {
 // import in main.go would give a DSN that parses and sets nothing — which
 // the test below catches even if this one is updated to match.
 func TestTier6SQLiteDSNSetsThePragmasThatMatter(t *testing.T) {
-	dsn := sqliteDSN("/var/lib/cryden/api.db")
+	dsn := sqliteDSN("/var/lib/cryden/csag.db")
 	for _, want := range []string{
-		"file:/var/lib/cryden/api.db",
+		"file:/var/lib/cryden/csag.db",
 		"_pragma=foreign_keys(1)",
 		"_pragma=busy_timeout(5000)",
 		"_pragma=journal_mode(WAL)",
@@ -106,7 +106,7 @@ func TestTier6SQLiteMigratesAndThePragmasSurviveTheDriver(t *testing.T) {
 func TestTier6OpenStoresReturnsEveryEngineStoreOnBothBackends(t *testing.T) {
 	sqliteDB := openTestSQLite(t)
 
-	st := openStores(config.Config{SQLitePath: "api.db"}, sqliteDB)
+	st := openStores(config.Config{SQLitePath: "csag.db"}, sqliteDB)
 	for name, store := range map[string]any{
 		"users":         st.users,
 		"sessions":      st.sessions,
@@ -164,7 +164,7 @@ func TestTier6OpenStoresReturnsEveryEngineStoreOnBothBackends(t *testing.T) {
 func TestTier6CoreAuthServesOnSQLiteWhileTheConsoleDoesNot(t *testing.T) {
 	ctx := context.Background()
 	db := openTestSQLite(t)
-	cfg := config.Config{SQLitePath: "api.db", JWTSecret: "test-secret"}
+	cfg := config.Config{SQLitePath: "csag.db", JWTSecret: "test-secret"}
 	st := openStores(cfg, db)
 
 	engine, err := cryden.New(cryden.Config{

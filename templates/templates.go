@@ -1,4 +1,4 @@
-// Package templates renders the message bodies this api sends, from
+// Package templates renders the message bodies this csag sends, from
 // plain-text template files on disk.
 //
 // It exists because cryden owns no template configuration at all, on

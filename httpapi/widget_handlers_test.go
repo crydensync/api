@@ -16,8 +16,8 @@ import (
 
 	crydenai "github.com/crydensync/cryden/v2/ai"
 
-	"github.com/crydensync/api/askai"
-	"github.com/crydensync/api/settings"
+	"github.com/crydensync/csag/askai"
+	"github.com/crydensync/csag/settings"
 )
 
 // The widget is the one AI-assisted surface here that is not behind

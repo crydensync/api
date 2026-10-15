@@ -12,7 +12,7 @@ import (
 	"github.com/crydensync/cryden/v2"
 	"github.com/crydensync/cryden/v2/token"
 
-	"github.com/crydensync/api/config"
+	"github.com/crydensync/csag/config"
 )
 
 // TestOAuthHealthReportsEveryProviderCase covers all four verdicts in one

@@ -1,11 +1,11 @@
-# api
+# csag
 
 <div align="center">
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/crydensync/cryden/v2.svg)](https://pkg.go.dev/github.com/crydensync/cryden/v2)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![GitHub Stars](https://img.shields.io/github/stars/crydensync/api?style=social)](https://github.com/crydensync/api/stargazers)
-[![GitHub Forks](https://img.shields.io/github/forks/crydensync/api?style=social)](https://github.com/crydensync/api/network/members)
+[![GitHub Stars](https://img.shields.io/github/stars/crydensync/csag?style=social)](https://github.com/crydensync/csag/stargazers)
+[![GitHub Forks](https://img.shields.io/github/forks/crydensync/csag?style=social)](https://github.com/crydensync/csag/network/members)
 
 </div>
 
@@ -23,21 +23,21 @@ Every consumer talks to this over plain HTTP no Go required. This is what a JS/P
 The no-clone path: install the binary, print its example configuration, edit, run.
 
 ```bash
-go install github.com/crydensync/api@latest
+go install github.com/crydensync/csag@latest
 
-mkdir api-test && cd api-test
-api env > .env   # the full commented template, embedded in the binary
+mkdir csag-test && cd csag-test
+csag env > .env   # the full commented template, embedded in the binary
 # edit .env: set DATABASE_URL (or SQLITE_PATH), JWT_SECRET, CORS_ORIGINS
-api
+csag
 ```
 
-`api env` prints only; it never writes a file, and `> .env` overwrites one you already have, so run it once. Because the template is embedded at build time, the copy `api env` prints is the exact variable set that binary reads, so an upgrade that adds settings can be diffed with `api env > .env.new && diff .env .env.new`. Check what an installed binary is with `api version` — a release build prints the tag it was built from (`v1.10.1`), a working-tree build says `dev`.
+`csag env` prints only; it never writes a file, and `> .env` overwrites one you already have, so run it once. Because the template is embedded at build time, the copy `csag env` prints is the exact variable set that binary reads, so an upgrade that adds settings can be diffed with `csag env > .env.new && diff .env .env.new`. Check what an installed binary is with `csag version` — a release build prints the tag it was built from (`v1.10.1`), a working-tree build says `dev`.
 
 With the repo cloned, the equivalent is:
 
 ```bash
-git clone https://github.com/crydensync/api
-cd api
+git clone https://github.com/crydensync/csag
+cd csag
 cp .env.example .env   # fill in DATABASE_URL, JWT_SECRET, CORS_ORIGINS
 go run .
 ```
@@ -45,14 +45,14 @@ go run .
 That is the whole setup. Migrations are applied automatically on boot see [Migrations](#migrations) so there is no separate step to run and nothing to remember after a `git pull`. Or with Docker, which needs no Go toolchain at all:
 
 ```bash
-docker run --env-file .env -p 8080:8080 ghcr.io/crydensync/api:latest
+docker run --env-file .env -p 8080:8080 ghcr.io/crydensync/csag:latest
 ```
 
 A SQLite deployment can skip the database server entirely by setting `SQLITE_PATH` and mounting a volume for it:
 
 ```bash
-docker run --env-file .env -p 8080:8080 -v api-data:/data \
-  -e SQLITE_PATH=/data/api.db ghcr.io/crydensync/api:latest
+docker run --env-file .env -p 8080:8080 -v csag-data:/data \
+  -e SQLITE_PATH=/data/csag.db ghcr.io/crydensync/csag:latest
 ```
 
 On SQLite, note that the container runs as a non-root user (uid 10001); a host directory mounted into `/data` must be writable by it.
@@ -100,7 +100,7 @@ This API runs on Postgres or on SQLite, chosen by exactly one environment variab
 
 ```
 DATABASE_URL=postgres://...      # everything
-SQLITE_PATH=/var/lib/cryden/api.db   # core auth only
+SQLITE_PATH=/var/lib/cryden/csag.db   # core auth only
 ```
 
 Setting both is a startup error, and so is setting neither. That is deliberate rather than a convenience: `DATABASE_URL` is what the admin console needs and `SQLITE_PATH` is what the store wiring reads, so quietly preferring one would run a deployment on a backend its own configuration does not describe.
@@ -121,9 +121,9 @@ No migration step exists on SQLite. `main.go` calls cryden's own `sqlite.Migrate
 
 The connection is opened with three pragmas, all of them load-bearing: `foreign_keys(1)` (off by default, so the schema's `ON DELETE` clauses would silently not run), `busy_timeout(5000)` (zero by default, so a concurrent writer gets an immediate `SQLITE_BUSY` instead of waiting), and `journal_mode(WAL)`. The server verifies the first two on every boot with cryden's own `CheckPragmas` and refuses to start if the DSN and the driver have drifted apart.
 
-**Backing up a SQLite deployment means copying `api.db`, `api.db-wal` and `api.db-shm` together**, or checkpointing first. With WAL, recent writes including, on a fresh deployment, the entire schema live in the `-wal` file until a checkpoint folds them into the main file. Copying `api.db` alone can silently produce an empty database in that window.
+**Backing up a SQLite deployment means copying `csag.db`, `csag.db-wal` and `csag.db-shm` together**, or checkpointing first. With WAL, recent writes including, on a fresh deployment, the entire schema live in the `-wal` file until a checkpoint folds them into the main file. Copying `csag.db` alone can silently produce an empty database in that window.
 
-A clean stop is what closes that window: on `SIGTERM` or `SIGINT` the server stops accepting connections, waits up to 30 seconds for the requests already in flight, stops the webhook worker and digest scheduler, and closes the database which on SQLite is the checkpoint that folds the `-wal` file back into `api.db` and removes the sidecar files. So `systemctl stop`, `docker stop` and Ctrl-C all leave a `api.db` that is complete on its own. A `kill -9`, a crash or a power loss does not, which is why the paragraph above still stands.
+A clean stop is what closes that window: on `SIGTERM` or `SIGINT` the server stops accepting connections, waits up to 30 seconds for the requests already in flight, stops the webhook worker and digest scheduler, and closes the database which on SQLite is the checkpoint that folds the `-wal` file back into `csag.db` and removes the sidecar files. So `systemctl stop`, `docker stop` and Ctrl-C all leave a `csag.db` that is complete on its own. A `kill -9`, a crash or a power loss does not, which is why the paragraph above still stands.
 
 ## Migrations
 
@@ -137,13 +137,13 @@ The two backends are migrated by different code, and that is deliberate rather t
 Both follow the same rules: `NNN_*.up.sql` in filename order, one transaction per file, and `.down.sql` files are never run automatically an automatic rollback of a schema holding live credentials is not something a boot path should be able to do by accident.
 
 ```
-api migrate            # apply pending migrations and exit; starts no server
-api migrate --baseline # record every embedded migration as already applied
+csag migrate            # apply pending migrations and exit; starts no server
+csag migrate --baseline # record every embedded migration as already applied
 ```
 
-`api migrate` is for teams who would rather schema changes be a reviewed step than something that happens during a rolling deploy. Set `SKIP_AUTO_MIGRATE=true` and the server starts without touching the schema; `api migrate` is then the step, in your pipeline, before the new version goes out.
+`csag migrate` is for teams who would rather schema changes be a reviewed step than something that happens during a rolling deploy. Set `SKIP_AUTO_MIGRATE=true` and the server starts without touching the schema; `csag migrate` is then the step, in your pipeline, before the new version goes out.
 
-**If your database already has this schema but no `schema_migrations` table** you applied the SQL by hand, or an earlier version of this repo had CI do it for you via `psql` then run `api migrate --baseline` once before your first start. Without it, auto-migration starts at `001` and stops on `relation "users" already exists`: a deployment that cannot start, caused by the feature meant to make starting easier. Baseline records every embedded migration as applied and runs none of them.
+**If your database already has this schema but no `schema_migrations` table** you applied the SQL by hand, or an earlier version of this repo had CI do it for you via `psql` then run `csag migrate --baseline` once before your first start. Without it, auto-migration starts at `001` and stops on `relation "users" already exists`: a deployment that cannot start, caused by the feature meant to make starting easier. Baseline records every embedded migration as applied and runs none of them.
 
 It is an explicit command rather than something the boot path detects, because the alternative is guessing. "The tracking table is missing but `users` exists, so assume everything ran" is right for the case above and silently wrong for a database that is genuinely half-migrated it would mark unrun migrations as applied, and the next deploy would look for columns that were never created.
 
@@ -319,7 +319,7 @@ Because the claim is baked in at issue time, a grant takes effect on that user's
 | `unreachable` | No HTTP response at all (DNS, TLS, connect, timeout) `error` carries the transport error. |
 | `not_configured` | No client ID/secret for it, so nothing was probed. |
 
-Probes run concurrently with a 5-second timeout each, carry no OAuth parameters and cannot start or complete a login. This is api-side logic: cryden knows whether a provider is configured, not whether it is reachable.
+Probes run concurrently with a 5-second timeout each, carry no OAuth parameters and cannot start or complete a login. This is csag-side logic: cryden knows whether a provider is configured, not whether it is reachable.
 
 `GET /v1/admin/security/hash-migration` reports how far a password-hash migration has got:
 

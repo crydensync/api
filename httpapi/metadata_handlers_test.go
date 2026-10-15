@@ -11,8 +11,8 @@ import (
 	"github.com/crydensync/cryden/v2"
 	"github.com/crydensync/cryden/v2/store/memory"
 
-	"github.com/crydensync/api/config"
-	"github.com/crydensync/api/usermeta"
+	"github.com/crydensync/csag/config"
+	"github.com/crydensync/csag/usermeta"
 )
 
 // roleFunc lets a test answer RoleFor without a database, the same job

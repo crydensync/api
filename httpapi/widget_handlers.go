@@ -3,7 +3,7 @@ package httpapi
 import (
 	"net/http"
 
-	"github.com/crydensync/api/askai"
+	"github.com/crydensync/csag/askai"
 )
 
 // WidgetHandlers serves the ask-ai widget to the signed-in end user.
