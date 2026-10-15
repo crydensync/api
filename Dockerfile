@@ -16,7 +16,14 @@ COPY . .
 # -trimpath keeps the build directory out of the binary; -s -w drop the
 # symbol table and DWARF data. Together they are most of the size, and
 # nothing here debugs a stripped binary by hand.
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /api .
+# -trimpath keeps the build directory out of the binary; -s -w drop the
+# symbol table and DWARF data. Together they are most of the size, and
+# nothing here debugs a stripped binary by hand. VERSION is stamped into
+# what `api version` prints — the release workflow passes the tag it is
+# building, so the image's binary answers "which release am I?" the same
+# way the cross-compiled ones do.
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /api .
 
 # alpine rather than scratch or distroless, for one concrete reason: this
 # image has to be able to write a SQLite database to a mounted volume, and

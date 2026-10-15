@@ -31,7 +31,7 @@ api env > .env   # the full commented template, embedded in the binary
 api
 ```
 
-`api env` prints only; it never writes a file, and `> .env` overwrites one you already have, so run it once. Because the template is embedded at build time, the copy `api env` prints is the exact variable set that binary reads, so an upgrade that adds settings can be diffed with `api env > .env.new && diff .env .env.new`.
+`api env` prints only; it never writes a file, and `> .env` overwrites one you already have, so run it once. Because the template is embedded at build time, the copy `api env` prints is the exact variable set that binary reads, so an upgrade that adds settings can be diffed with `api env > .env.new && diff .env .env.new`. Check what an installed binary is with `api version` — a release build prints the tag it was built from (`v1.10.1`), a working-tree build says `dev`.
 
 With the repo cloned, the equivalent is:
 

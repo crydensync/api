@@ -84,8 +84,11 @@ jobs:
             name="api_${GOOS}_${GOARCH}"
             [ "$GOOS" = windows ] && name="${name}.exe"
             echo "building $name"
+            # main.version is what `api version` prints. GITHUB_REF_NAME
+            # is the tag that triggered this run, so a release binary
+            # names its own tag; see version_cmd.go.
             CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
-              go build -trimpath -ldflags="-s -w" -o "dist/$name" .
+              go build -trimpath -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" -o "dist/$name" .
           done
           cd dist && sha256sum * > SHA256SUMS
 
@@ -95,7 +98,8 @@ jobs:
           image="ghcr.io/${GITHUB_REPOSITORY,,}"
           echo "${{ secrets.GITHUB_TOKEN }}" \
             | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker build -t "$image:${GITHUB_REF_NAME}" -t "$image:latest" .
+          docker build -t "$image:${GITHUB_REF_NAME}" -t "$image:latest" \
+            --build-arg VERSION="${GITHUB_REF_NAME}" .
           docker push "$image:${GITHUB_REF_NAME}"
           docker push "$image:latest"
 

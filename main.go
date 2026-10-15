@@ -62,7 +62,9 @@ const usage = `usage: api [command]
                              schema_migrations table — see migrate.go
   env            print the example configuration to stdout: "api env > .env"
                  gives a fresh deployment the full commented template to
-                 edit. Prints only, never writes a file itself`
+                 edit. Prints only, never writes a file itself
+  version        print the release this binary was built from — the tag
+                 name for release builds, "dev" for a working-tree build`
 
 func main() {
 	// Dispatch before config.Load, deliberately. `api --help` on a machine
@@ -82,6 +84,8 @@ func main() {
 		runMigrate(args[1:])
 	case args[0] == "env":
 		runEnv(args[1:])
+	case args[0] == "version":
+		runVersion(args[1:])
 	default:
 		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s\n", args[0], usage)
 		os.Exit(2)
