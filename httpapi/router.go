@@ -276,6 +276,15 @@ func NewRouter(d Deps) http.Handler {
 	// reachable from an AI tool, which is what CLAUDE.md's hard rule
 	// actually protects. See README's note on the admin surface.
 	mux.HandleFunc("GET /v1/admin/oauth/health", adminOnly(oauthHealth.Health))
+	// The configured-provider list answers from configuration alone (no
+	// probe), and the per-provider test runs the health report's own probe
+	// against one provider on demand. Both serve the console's OAuth
+	// Providers screen; see oauth_providers.go for why the list exists at
+	// all when health already covers the same names.
+	mux.HandleFunc("GET /v1/admin/oauth/providers", adminOnly(oauthHealth.Providers))
+	mux.HandleFunc("POST /v1/admin/oauth/{provider}/test", adminOnly(func(w http.ResponseWriter, r *http.Request) {
+		oauthHealth.TestProvider(w, r, r.PathValue("provider"))
+	}))
 	mux.HandleFunc("GET /v1/admin/security/hash-migration", adminOnly(security.HashMigration))
 	// Second-factor enrolment, as the engine's own audit events against the
 	// user total. Reports events rather than users, and says so — cryden

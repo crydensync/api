@@ -77,6 +77,18 @@ components:
             region: { type: string }
             country: { type: string }
 
+    OAuthProviderSummary:
+      type: object
+      description: One provider's row in GET /admin/oauth/providers. Configuration only; nothing probed.
+      properties:
+        provider: { type: string, description: 'google, github, microsoft, discord, gitlab or apple' }
+        configured:
+          type: boolean
+          description: >
+            Whether this deployment has credentials for the provider. False
+            means it cannot log anyone in. The probe answer for a
+            configured provider is POST /admin/oauth/{provider}/test.
+
     OAuthProviderHealth:
       type: object
       description: One provider's row in GET /admin/oauth/health.
@@ -1431,6 +1443,72 @@ paths:
                         items: { $ref: '#/components/schemas/OAuthProviderHealth' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/oauth/providers:
+    get:
+      summary: Which OAuth providers this deployment has credentials for
+      description: >
+        Admin only — an operator's token. One row per provider this API can
+        speak to: its name and whether it is configured. Answers from
+        configuration alone; no probe runs and no request leaves the
+        process, which is why it exists beside /admin/oauth/health — a
+        screen renders the list on open and probes only when the operator
+        asks. Read-only by design: credentials arrive by environment, so
+        there is nothing here to create or edit.
+      security: [{ bearerAuth: [] }]
+      responses:
+        '200':
+          description: One row per provider, in a stable order, none probed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      providers:
+                        type: array
+                        items: { $ref: '#/components/schemas/OAuthProviderSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
+
+  /admin/oauth/{provider}/test:
+    post:
+      summary: Probe one configured provider's authorize endpoint, on demand
+      description: >
+        Admin only — an operator's token. The same probe the health report
+        runs (same client, same 5 s timeout, same 4xx-is-ok reading),
+        against the one provider named in the path, so testing one costs
+        one outbound request rather than six. An unconfigured provider
+        answers 404 oauth_provider_not_configured and nothing is probed:
+        "never configured" and "down" are different sentences, and probing
+        an unconfigured name is the one request this endpoint would make
+        for a provider the deployment never opted into.
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - name: provider
+          in: path
+          required: true
+          schema: { type: string, description: 'google, github, microsoft, discord, gitlab or apple' }
+      responses:
+        '200':
+          description: The probe's verdict for that one provider
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/OAuthProviderHealth' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404':
+          description: oauth_provider_not_configured — no credentials for that provider, so nothing was probed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
         '501': { $ref: '#/components/responses/NotImplementedOnSQLite' }
 
   /admin/users:
